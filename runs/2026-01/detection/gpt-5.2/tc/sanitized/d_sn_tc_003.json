@@ -1,0 +1,73 @@
+{
+  "sample_id": "sn_tc_003",
+  "variant": "sanitized",
+  "model": "gpt-5.2",
+  "prompt_type": "direct",
+  "timestamp": "2026-01-05T02:22:05.621102+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "access_control",
+    "vulnerable_function": "kill",
+    "vulnerable_lines": [
+      20,
+      51
+    ],
+    "severity": "critical"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.95,
+    "vulnerabilities": [
+      {
+        "type": "Unprotected initialization (proxy takeover via delegatecall)",
+        "severity": "critical",
+        "vulnerable_lines": [
+          16,
+          20,
+          22,
+          25,
+          28,
+          38,
+          39,
+          78,
+          79,
+          80,
+          51,
+          56
+        ],
+        "location": "WalletLibrary.initWallet() + WalletProxy constructor/fallback + WalletLibrary.kill()",
+        "explanation": "WalletProxy delegates all calls to WalletLibrary (LN-86 to LN-103). The proxy constructor only sets the library address (LN-78 to LN-80) and never initializes owner state in the proxy. Because initWallet() is public and lacks any one-time initialization guard (no require(!initialized)), any external caller can call initWallet() THROUGH THE PROXY (delegatecall) and thereby write owner state into the proxy\u2019s storage, making themselves an owner (LN-16 to LN-40). Once owner, the attacker can call kill() through the proxy, which will selfdestruct the PROXY (delegatecall context) and send all ETH to an attacker-controlled address (LN-51 to LN-57).",
+        "attack_scenario": "1) Find a deployed WalletProxy that holds ETH.\n2) Call the proxy with calldata for initWallet([attackerAddress], 1, 0). Because of delegatecall, this sets isOwner[attacker]=true in the proxy\u2019s storage.\n3) Call the proxy with calldata for kill(attackerPayableAddress).\n4) kill() passes the owner check and executes selfdestruct in the proxy context, transferring the proxy\u2019s entire ETH balance to the attacker and permanently destroying the proxy.",
+        "suggested_fix": "In WalletLibrary.initWallet(): add a strict one-time guard, e.g., `require(!initialized, \"already initialized\")` before modifying owners, and set `initialized = true` immediately. Better: remove initializer from the library and perform initialization in the proxy constructor by delegatecalling initWallet during deployment.\nAdditionally, remove/disable selfdestruct logic (kill) or restrict it to an immutable admin set at deployment and ensure it cannot be reached via delegatecall from user-owned proxies."
+      },
+      {
+        "type": "Logic contract takeover leading to global DoS (library selfdestruct)",
+        "severity": "high",
+        "vulnerable_lines": [
+          16,
+          20,
+          28,
+          38,
+          39,
+          51,
+          56
+        ],
+        "location": "WalletLibrary.initWallet() and WalletLibrary.kill() (called directly on the library contract)",
+        "explanation": "The library itself is also a deployed contract with its own storage. Because initWallet() is public and has no initialization guard, any attacker can directly call initWallet() on the WalletLibrary contract address and set themselves as an owner in the library\u2019s own storage (LN-16 to LN-40). They can then directly call kill(), which only checks isOwner[msg.sender] (LN-51 to LN-53) and will selfdestruct the library (LN-56). Destroying the library removes the runtime bytecode at that address, causing all WalletProxy instances that delegatecall to it to revert/break permanently (availability loss for all wallets using that library).",
+        "attack_scenario": "1) Locate the deployed WalletLibrary address used by many WalletProxy instances.\n2) Call WalletLibrary.initWallet([attackerAddress], 1, 0) directly on the library contract.\n3) Call WalletLibrary.kill(attackerPayableAddress) directly.\n4) The library selfdestructs; thereafter, all proxies delegating to that address fail to execute wallet logic, effectively bricking them (DoS).",
+        "suggested_fix": "Make the logic contract non-initializable and non-destructible: set `initialized = true` in a constructor on the library (or remove the state entirely), and/or make initWallet internal or protected by a factory-only mechanism.\nRemove selfdestruct from the library entirely. If a shutdown is required, implement it at the proxy level with explicit governance and without relying on a shared library\u2019s selfdestruct."
+      }
+    ],
+    "overall_explanation": "The system is critically vulnerable due to an unprotected initializer in a delegatecall-based proxy setup. Any user can initialize a proxy to become an owner and then selfdestruct the proxy to steal its ETH. Separately, the same unprotected initializer allows anyone to seize ownership of the shared WalletLibrary contract and selfdestruct it, permanently breaking all proxies that rely on it (global DoS)."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.95,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Unprotected initialization (proxy takeover via delegatecall)\",\n      \"severity\": \"critical\",\n      \"vulnerable_lines\": [16, 20, 22, 25, 28, 38, 39, 78, 79, 80, 51, 56],\n      \"location\": \"WalletLibrary.initWallet() + WalletProxy constructor/fallback + WalletLibrary.kill()\",\n      \"explanation\": \"WalletProxy delegates all calls to WalletLibrary (LN-86 to LN-103). The proxy constructor only sets the library address (LN-78 to LN-80) and never initializes owner state in the proxy. Because initWallet() is public and lacks any one-time initialization guard (no require(!initialized)), any external caller can call initWallet() THROUGH THE PROXY (delegatecall) and thereby write owner state into the proxy\u2019s storage, making themselves an owner (LN-16 to LN-40). Once owner, the attacker can call kill() through the proxy, which will selfdestruct the PROXY (delegatecall context) and send all ETH to an attacker-controlled address (LN-51 to LN-57).\",\n      \"attack_scenario\": \"1) Find a deployed WalletProxy that holds ETH.\\n2) Call the proxy with calldata for initWallet([attackerAddress], 1, 0). Because of delegatecall, this sets isOwner[attacker]=true in the proxy\u2019s storage.\\n3) Call the proxy with calldata for kill(attackerPayableAddress).\\n4) kill() passes the owner check and executes selfdestruct in the proxy context, transferring the proxy\u2019s entire ETH balance to the attacker and permanently destroying the proxy.\",\n      \"suggested_fix\": \"In WalletLibrary.initWallet(): add a strict one-time guard, e.g., `require(!initialized, \\\"already initialized\\\")` before modifying owners, and set `initialized = true` immediately. Better: remove initializer from the library and perform initialization in the proxy constructor by delegatecalling initWallet during deployment.\\nAdditionally, remove/disable selfdestruct logic (kill) or restrict it to an immutable admin set at deployment and ensure it cannot be reached via delegatecall from user-owned proxies.\"\n    },\n    {\n      \"type\": \"Logic contract takeover leading to global DoS (library selfdestruct)\",\n      \"severity\": \"high\",\n      \"vulnerable_lines\": [16, 20, 28, 38, 39, 51, 56],\n      \"location\": \"WalletLibrary.initWallet() and WalletLibrary.kill() (called directly on the library contract)\",\n      \"explanation\": \"The library itself is also a deployed contract with its own storage. Because initWallet() is public and has no initialization guard, any attacker can directly call initWallet() on the WalletLibrary contract address and set themselves as an owner in the library\u2019s own storage (LN-16 to LN-40). They can then directly call kill(), which only checks isOwner[msg.sender] (LN-51 to LN-53) and will selfdestruct the library (LN-56). Destroying the library removes the runtime bytecode at that address, causing all WalletProxy instances that delegatecall to it to revert/break permanently (availability loss for all wallets using that library).\",\n      \"attack_scenario\": \"1) Locate the deployed WalletLibrary address used by many WalletProxy instances.\\n2) Call WalletLibrary.initWallet([attackerAddress], 1, 0) directly on the library contract.\\n3) Call WalletLibrary.kill(attackerPayableAddress) directly.\\n4) The library selfdestructs; thereafter, all proxies delegating to that address fail to execute wallet logic, effectively bricking them (DoS).\",\n      \"suggested_fix\": \"Make the logic contract non-initializable and non-destructible: set `initialized = true` in a constructor on the library (or remove the state entirely), and/or make initWallet internal or protected by a factory-only mechanism.\\nRemove selfdestruct from the library entirely. If a shutdown is required, implement it at the proxy level with explicit governance and without relying on a shared library\u2019s selfdestruct.\"\n    }\n  ],\n  \"overall_explanation\": \"The system is critically vulnerable due to an unprotected initializer in a delegatecall-based proxy setup. Any user can initialize a proxy to become an owner and then selfdestruct the proxy to steal its ETH. Separately, the same unprotected initializer allows anyone to seize ownership of the shared WalletLibrary contract and selfdestruct it, permanently breaking all proxies that rely on it (global DoS).\"\n}\n```"
+  },
+  "api_metrics": {
+    "input_tokens": 2051,
+    "output_tokens": 1431,
+    "latency_ms": 27337.49508857727
+  }
+}

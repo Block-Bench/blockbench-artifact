@@ -1,0 +1,60 @@
+{
+  "sample_id": "gs_008",
+  "dataset": "gs",
+  "prompt_type": "context_protocol_cot",
+  "model": "gpt-5.2",
+  "timestamp": "2026-05-25T17:00:04.695042+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "logic_error",
+    "vulnerable_functions": [
+      "claimRewards"
+    ],
+    "severity": "medium",
+    "description": "`claimRewards()` uses `IVoter.poolVote(veTokenId)` incorrectly; `poolVote` is a mapping, not a function returning an array, causing a revert.",
+    "root_cause": "`claimRewards()` uses `IVoter.poolVote(veTokenId)` incorrectly; `poolVote` is a mapping, not a function returning an array, causing a revert.",
+    "attack_scenario": "A test votes on pools, warps time, and `claimRewards()` reverts due to invalid getter call.",
+    "fix_description": "Add `getPoolVote(veTokenId)` in `VoterV3.sol` to return the array. Status: Mitigation confirmed.",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.92,
+    "vulnerabilities": [
+      {
+        "type": "share_price_manipulation / incorrect share minting (deposit calculates shares after increasing assets)",
+        "severity": "critical",
+        "vulnerable_function": "deposit(uint256,address)",
+        "location": "GrowthHYBR.deposit",
+        "explanation": "Shares are calculated AFTER the deposit amount has already been added into the veNFT (via create_lock_for/deposit_for). This makes `totalAssets()` include the user's own deposit when computing `shares = amount * totalSupply / totalAssets`, under-minting shares and transferring value from the depositor to existing shareholders. In the extreme, if `totalSupply` is small relative to `totalAssets` after deposit, integer division can mint 0 shares, permanently locking the user's HYBR with no gHYBR claim.",
+        "attack_scenario": "1) Attacker deposits 1 HYBR as the first depositor and receives 1 gHYBR.\n2) Victim later deposits 100 HYBR.\n3) Contract deposits victim's 100 HYBR into veNFT first; now totalAssets=101, totalSupply=1.\n4) Shares minted to victim = 100*1/101 = 0 (rounds down).\n5) Victim receives 0 gHYBR, cannot withdraw, while attacker\u2019s 1 gHYBR now represents ~101 HYBR worth of backing.",
+        "suggested_fix": "Compute shares using pre-deposit assets: `uint256 assetsBefore = totalAssets(); uint256 supply = totalSupply(); shares = (supply==0) ? amount : amount * supply / assetsBefore;` then perform the veNFT deposit/lock. Also add `require(shares > 0, \"ZERO_SHARES\");` and consider ERC4626-style preview functions."
+      },
+      {
+        "type": "logic error / denial of service (ABI mismatch calling mapping getter as array)",
+        "severity": "medium",
+        "vulnerable_function": "claimRewards()",
+        "location": "GrowthHYBR.claimRewards",
+        "explanation": "`claimRewards()` calls `IVoter(voter).poolVote(veTokenId)` expecting an `address[]`. In the provided VoterV3, `poolVote` is declared as `mapping(uint256 => address[]) public poolVote;` so Solidity generates a getter `poolVote(uint256,uint256) -> address` (element accessor), not a function returning the whole array. Calling it with the wrong ABI causes decoding to revert, so `claimRewards()` reverts and cannot be executed, preventing rebase/bribe harvesting.",
+        "attack_scenario": "1) Contract has an initialized veTokenId and has voted via VoterV3.\n2) Operator calls `claimRewards()`.\n3) External call attempts to decode `poolVote(veTokenId)` as an array.\n4) VoterV3 returns only a single `address` element accessor ABI; decoding fails and the call reverts.\n5) Rewards claiming/compounding via this path is effectively DoSed.",
+        "suggested_fix": "Expose an explicit view function in VoterV3, e.g. `function getPoolVote(uint256 tokenId) external view returns (address[] memory) { return poolVote[tokenId]; }`, and use that in GrowthHYBR. Alternatively, query `poolVoteLength()` and then read each element via the generated getter."
+      }
+    ],
+    "overall_explanation": "GrowthHYBR aims to tokenise a veHYBR position into transferable shares. However, deposits mint shares using post-deposit `totalAssets()`, enabling severe dilution and even minting zero shares (permanent loss of deposited HYBR). Separately, `claimRewards()` is broken due to an ABI mismatch when reading voted pools from VoterV3, causing consistent reverts and preventing reward harvesting."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.92,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"share_price_manipulation / incorrect share minting (deposit calculates shares after increasing assets)\",\n      \"severity\": \"critical\",\n      \"vulnerable_function\": \"deposit(uint256,address)\",\n      \"location\": \"GrowthHYBR.deposit\",\n      \"explanation\": \"Shares are calculated AFTER the deposit amount has already been added into the veNFT (via create_lock_for/deposit_for). This makes `totalAssets()` include the user's own deposit when computing `shares = amount * totalSupply / totalAssets`, under-minting shares and transferring value from the depositor to existing shareholders. In the extreme, if `totalSupply` is small relative to `totalAssets` after deposit, integer division can mint 0 shares, permanently locking the user's HYBR with no gHYBR claim.\",\n      \"attack_scenario\": \"1) Attacker deposits 1 HYBR as the first depositor and receives 1 gHYBR.\\n2) Victim later deposits 100 HYBR.\\n3) Contract deposits victim's 100 HYBR into veNFT first; now totalAssets=101, totalSupply=1.\\n4) Shares minted to victim = 100*1/101 = 0 (rounds down).\\n5) Victim receives 0 gHYBR, cannot withdraw, while attacker\u2019s 1 gHYBR now represents ~101 HYBR worth of backing.\",\n      \"suggested_fix\": \"Compute shares using pre-deposit assets: `uint256 assetsBefore = totalAssets(); uint256 supply = totalSupply(); shares = (supply==0) ? amount : amount * supply / assetsBefore;` then perform the veNFT deposit/lock. Also add `require(shares > 0, \\\"ZERO_SHARES\\\");` and consider ERC4626-style preview functions.\"\n    },\n    {\n      \"type\": \"logic error / denial of service (ABI mismatch calling mapping getter as array)\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"claimRewards()\",\n      \"location\": \"GrowthHYBR.claimRewards\",\n      \"explanation\": \"`claimRewards()` calls `IVoter(voter).poolVote(veTokenId)` expecting an `address[]`. In the provided VoterV3, `poolVote` is declared as `mapping(uint256 => address[]) public poolVote;` so Solidity generates a getter `poolVote(uint256,uint256) -> address` (element accessor), not a function returning the whole array. Calling it with the wrong ABI causes decoding to revert, so `claimRewards()` reverts and cannot be executed, preventing rebase/bribe harvesting.\",\n      \"attack_scenario\": \"1) Contract has an initialized veTokenId and has voted via VoterV3.\\n2) Operator calls `claimRewards()`.\\n3) External call attempts to decode `poolVote(veTokenId)` as an array.\\n4) VoterV3 returns only a single `address` element accessor ABI; decoding fails and the call reverts.\\n5) Rewards claiming/compounding via this path is effectively DoSed.\",\n      \"suggested_fix\": \"Expose an explicit view function in VoterV3, e.g. `function getPoolVote(uint256 tokenId) external view returns (address[] memory) { return poolVote[tokenId]; }`, and use that in GrowthHYBR. Alternatively, query `poolVoteLength()` and then read each element via the generated getter.\"\n    }\n  ],\n  \"overall_explanation\": \"GrowthHYBR aims to tokenise a veHYBR position into transferable shares. However, deposits mint shares using post-deposit `totalAssets()`, enabling severe dilution and even minting zero shares (permanent loss of deposited HYBR). Separately, `claimRewards()` is broken due to an ABI mismatch when reading voted pools from VoterV3, causing consistent reverts and preventing reward harvesting.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": true,
+    "context_file_count": 1,
+    "has_protocol_doc": false
+  },
+  "api_metrics": {
+    "input_tokens": 8545,
+    "output_tokens": 2112,
+    "latency_ms": 33553.57789993286
+  }
+}

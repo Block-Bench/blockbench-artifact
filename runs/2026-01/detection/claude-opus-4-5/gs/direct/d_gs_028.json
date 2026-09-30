@@ -1,0 +1,60 @@
+{
+  "sample_id": "gs_028",
+  "dataset": "gs",
+  "prompt_type": "direct",
+  "model": "claude-opus-4-5",
+  "timestamp": "2026-01-05T12:55:43.122080+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "access_control",
+    "vulnerable_functions": [
+      "recover"
+    ],
+    "severity": "high",
+    "description": "When a wallet is behind a checkpointer and a chained signature is used with bit 6 (checkpointer usage flag) set to zero, BaseSig.recover skips the checkpointer validation block (BaseSig.sol:88-106). This leaves _checkpointer and snapshot unset (zero-valued). In recoverChained, the checkpointer is ignored, and the signature validation passes even if the checkpointer should be enforced. The final validation succeeds because snapshot.imageHash == bytes32(0) as the checkpointer is ignored.",
+    "root_cause": "When a wallet is behind a checkpointer and a chained signature is used with bit 6 (checkpointer usage flag) set to zero, BaseSig.recover skips the checkpointer validation block (BaseSig.sol:88-106). This leaves _checkpointer and snapshot unset (zero-valued). In recoverChained, the checkpointer is ignored, and the signature validation passes even if the checkpointer should be enforced. The final validation succeeds because snapshot.imageHash == bytes32(0) as the checkpointer is ignored.",
+    "attack_scenario": "An evicted signer can sign a payload valid under stale wallet configuration and bypass checkpointer validation. PoC: Add test case to BaseSigTest and run forge test --match-test test_PoC_checkpointer_bypass. The test constructs a chained signature with checkpointer disabled, mocks the checkpointer response, and asserts successful recovery with correct image hash.",
+    "fix_description": "Do not permit checkpointer to be disabled (bit 6 unset) if chained signature is used. Revert in this case with custom error. Example fix in BaseSig.sol:\nif (signatureFlag & 0x40 == 0) {\n    revert MissingCheckpointer();\n}",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.85,
+    "vulnerabilities": [
+      {
+        "type": "Signature Malleability / Missing Zero Address Check",
+        "severity": "high",
+        "vulnerable_function": "recoverBranch",
+        "location": "BaseSig.recoverBranch - FLAG_SIGNATURE_HASH and FLAG_SIGNATURE_ETH_SIGN handlers",
+        "explanation": "When ecrecover fails (due to invalid signature parameters), it returns address(0) instead of reverting. The code does not check if the recovered address is address(0) before using it to compute the merkle leaf and adding weight. An attacker can craft signatures with invalid parameters that cause ecrecover to return address(0), and if address(0) with some weight is part of the merkle tree configuration, the attacker gains that weight without a valid signature. This allows unauthorized signature weight accumulation.",
+        "attack_scenario": "1. A wallet configuration includes address(0) as a signer with weight W (possibly unintentionally or through a misconfiguration). 2. Attacker crafts a signature with FLAG_SIGNATURE_HASH (0x00) using invalid ECDSA parameters (e.g., s > secp256k1n/2 or v not in {27,28}). 3. ecrecover returns address(0). 4. The code computes _leafForAddressAndWeight(address(0), W) and adds W to the total weight. 5. If this weight helps reach the threshold, the attacker can authorize transactions without valid signatures from legitimate signers.",
+        "suggested_fix": "Add a check after ecrecover to ensure the recovered address is not address(0): `address addr = ecrecover(_opHash, v, r, s); require(addr != address(0), \"Invalid signature\");` Apply this fix to both FLAG_SIGNATURE_HASH and FLAG_SIGNATURE_ETH_SIGN handlers."
+      },
+      {
+        "type": "Unchecked External Call Return Value",
+        "severity": "medium",
+        "vulnerable_function": "recoverBranch",
+        "location": "BaseSig.recoverBranch - FLAG_SIGNATURE_SAPIENT and FLAG_SIGNATURE_SAPIENT_COMPACT handlers",
+        "explanation": "The ISapient and ISapientCompact external calls (recoverSapientSignature and recoverSapientSignatureCompact) return a bytes32 imageHash that is directly used without validation. A malicious or buggy Sapient contract could return an arbitrary imageHash, potentially allowing it to impersonate any configuration. While the Sapient address is part of the leaf computation, if the Sapient contract is compromised or malicious, it can return any imageHash to manipulate the merkle tree computation.",
+        "attack_scenario": "1. A wallet configuration includes a Sapient signer at address X with weight W. 2. The Sapient contract at X is compromised or intentionally malicious. 3. When recoverSapientSignature is called, it returns an arbitrary imageHash chosen by the attacker. 4. This imageHash is used in _leafForSapient without validation. 5. The attacker can manipulate the merkle root computation by returning specific imageHash values.",
+        "suggested_fix": "Document that Sapient signers must be trusted contracts. Consider adding a registry of approved Sapient implementations or requiring the imageHash to match a pre-committed value in the configuration."
+      }
+    ],
+    "overall_explanation": "The BaseSig library contains a signature recovery vulnerability where ecrecover returning address(0) on invalid signatures is not checked. This could allow attackers to gain signature weight if address(0) is inadvertently part of the wallet configuration. Additionally, the Sapient signature handlers trust external contracts to return valid imageHashes without verification, which could be exploited if those contracts are malicious. The context file (UnstakeRequestsManager) is unrelated to the main contract and doesn't introduce additional vulnerabilities to BaseSig. The most critical issue is the missing zero-address check after ecrecover, which is a well-known vulnerability pattern in signature verification."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.85,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Signature Malleability / Missing Zero Address Check\",\n      \"severity\": \"high\",\n      \"vulnerable_function\": \"recoverBranch\",\n      \"location\": \"BaseSig.recoverBranch - FLAG_SIGNATURE_HASH and FLAG_SIGNATURE_ETH_SIGN handlers\",\n      \"explanation\": \"When ecrecover fails (due to invalid signature parameters), it returns address(0) instead of reverting. The code does not check if the recovered address is address(0) before using it to compute the merkle leaf and adding weight. An attacker can craft signatures with invalid parameters that cause ecrecover to return address(0), and if address(0) with some weight is part of the merkle tree configuration, the attacker gains that weight without a valid signature. This allows unauthorized signature weight accumulation.\",\n      \"attack_scenario\": \"1. A wallet configuration includes address(0) as a signer with weight W (possibly unintentionally or through a misconfiguration). 2. Attacker crafts a signature with FLAG_SIGNATURE_HASH (0x00) using invalid ECDSA parameters (e.g., s > secp256k1n/2 or v not in {27,28}). 3. ecrecover returns address(0). 4. The code computes _leafForAddressAndWeight(address(0), W) and adds W to the total weight. 5. If this weight helps reach the threshold, the attacker can authorize transactions without valid signatures from legitimate signers.\",\n      \"suggested_fix\": \"Add a check after ecrecover to ensure the recovered address is not address(0): `address addr = ecrecover(_opHash, v, r, s); require(addr != address(0), \\\"Invalid signature\\\");` Apply this fix to both FLAG_SIGNATURE_HASH and FLAG_SIGNATURE_ETH_SIGN handlers.\"\n    },\n    {\n      \"type\": \"Unchecked External Call Return Value\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"recoverBranch\",\n      \"location\": \"BaseSig.recoverBranch - FLAG_SIGNATURE_SAPIENT and FLAG_SIGNATURE_SAPIENT_COMPACT handlers\",\n      \"explanation\": \"The ISapient and ISapientCompact external calls (recoverSapientSignature and recoverSapientSignatureCompact) return a bytes32 imageHash that is directly used without validation. A malicious or buggy Sapient contract could return an arbitrary imageHash, potentially allowing it to impersonate any configuration. While the Sapient address is part of the leaf computation, if the Sapient contract is compromised or malicious, it can return any imageHash to manipulate the merkle tree computation.\",\n      \"attack_scenario\": \"1. A wallet configuration includes a Sapient signer at address X with weight W. 2. The Sapient contract at X is compromised or intentionally malicious. 3. When recoverSapientSignature is called, it returns an arbitrary imageHash chosen by the attacker. 4. This imageHash is used in _leafForSapient without validation. 5. The attacker can manipulate the merkle root computation by returning specific imageHash values.\",\n      \"suggested_fix\": \"Document that Sapient signers must be trusted contracts. Consider adding a registry of approved Sapient implementations or requiring the imageHash to match a pre-committed value in the configuration.\"\n    }\n  ],\n  \"overall_explanation\": \"The BaseSig library contains a signature recovery vulnerability where ecrecover returning address(0) on invalid signatures is not checked. This could allow attackers to gain signature weight if address(0) is inadvertently part of the wallet configuration. Additionally, the Sapient signature handlers trust external contracts to return valid imageHashes without verification, which could be exploited if those contracts are malicious. The context file (UnstakeRequestsManager) is unrelated to the main contract and doesn't introduce additional vulnerabilities to BaseSig. The most critical issue is the missing zero-address check after ecrecover, which is a well-known vulnerability pattern in signature verification.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": true,
+    "context_file_count": 1,
+    "has_protocol_doc": false
+  },
+  "api_metrics": {
+    "input_tokens": 8812,
+    "output_tokens": 980,
+    "latency_ms": 19227.393865585327
+  }
+}

@@ -1,0 +1,87 @@
+{
+  "sample_id": "gs_002",
+  "dataset": "gs",
+  "prompt_type": "context_protocol_cot_naturalistic",
+  "model": "qwen3-coder-plus",
+  "timestamp": "2026-01-05T15:28:38.599343+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "logic_error",
+    "vulnerable_functions": [
+      "getSwapFee"
+    ],
+    "severity": "medium",
+    "description": "Governance can configure `DynamicSwapFeeModule` with fees up to 50%, but `CLFactory.getSwapFee` discards any value above 100_000 ppm (10%) and falls back to the tick-spacing default (often 500 ppm = 0.05%) without reverting or logging. Operators see the module reporting 20%, yet users continue paying the tiny default fee. The silent fallback misleads governance into believing higher fees are active. Impact - Governance believes a protective high fee is set (e.g., during launch anti-MEV), but the effective fee drops back to the default (e.g., 0.05%). - Traders are charged far less than intended, defeating protective or revenue objectives. - The misconfiguration has no on-chain signal, so the mistake can persist unnoticed. Root Cause - getSwapFee checks fee <= 100_000 ; larger values are ignored and the function returns tickSpacingToFee . - The module itself allows feeCap up to 500_000 (50%), so governance can set a value the factory immediately discards in favor of the default.",
+    "root_cause": "Governance can configure `DynamicSwapFeeModule` with fees up to 50%, but `CLFactory.getSwapFee` discards any value above 100_000 ppm (10%) and falls back to the tick-spacing default (often 500 ppm = 0.05%) without reverting or logging. Operators see the module reporting 20%, yet users continue paying the tiny default fee. The silent fallback misleads governance into believing higher fees are active. Impact - Governance believes a protective high fee is set (e.g., during launch anti-MEV), but the effective fee drops back to the default (e.g., 0.05%). - Traders are charged far less than intended, defeating protective or revenue objectives. - The misconfiguration has no on-chain signal, so the mistake can persist unnoticed. Root Cause - getSwapFee checks fee <= 100_000 ; larger values are ignored and the function returns tickSpacingToFee . - The module itself allows feeCap up to 500_000 (50%), so governance can set a value the factory immediately discards in favor of the default.",
+    "attack_scenario": "cd cl forge test --match-path test/PoC_DynamicFee_ClampToDefault.t.sol -vvv The PoC lifts the module cap, sets a 20% custom fee, and shows that `DynamicSwapFeeModule.getFee` returns 200_000 while `CLFactory.getSwapFee` still returns the base 500 ppm. PoC source ( `cl/test/PoC_DynamicFee_ClampToDefault.t.sol` ): // SPDX-License-Identifier: MIT pragma solidity 0.7.6; pragma abicoder v2; import \"forge-std/Test.sol\"; import {C4PoCTestbed} from \"./C4PoCTestbed.t.sol\"; import {DynamicSwapFeeModule} from \"contracts/core/fees/DynamicSwapFeeModule.sol\"; contract PoC_DynamicFee_ClampToDefault is C4PoCTestbed { address internal pool; function setUp() public override { super.setUp(); pool = poolFactory.createPool(USDC, DAI, 100, uint160(2 ** 96)); require(pool != address(0), \"pool not created\"); } function testFactoryClampsFeeAboveTenPercent() public { address manager = poolFactory.swapFeeManager(); vm.prank(manager); swapFeeModule.setFeeCap(pool, 500_000); // raise module cap to 50% vm.prank(manager); swapFeeModule.setScalingFactor(pool, 1); // ensure positive TWAP delta doesn't zero fee uint24 highFee = 200_000; // 20% vm.prank(manager); swapFeeModule.setCustomFee(pool, highFee); uint24 moduleFee = swapFeeModule.getFee(pool); assertEq(uint256(moduleFee), uint256(highFee), \"module reports configured fee\"); uint24 factoryFee = poolFactory.getSwapFee(pool); assertEq(uint256(factoryFee), 500, \"factory silently clamps to tick-spacing default\"); } }",
+    "fix_description": "Either revert when the module returns > 100_000 or raise the factory ceiling to match the module\u2019s cap. Emit events or add admin tooling to surface out-of-range configurations so operators can correct them. Hybra Finance mitigated: Added setMaxFee() function to make the fee cap configurable by the owner (up to 50%). This replaces the hardcoded limit and allows governance to adjust the maximum dynamic fee when needed.",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.85,
+    "vulnerabilities": [
+      {
+        "type": "Governance Access Control",
+        "severity": "critical",
+        "vulnerable_function": "collectAllProtocolFees",
+        "location": "Lines 257-263",
+        "explanation": "The function allows the owner to collect all protocol fees from all pools at once, but uses a simple loop that could run out of gas or fail partway through if there are many pools. This could result in partial collection or complete failure to collect fees.",
+        "attack_scenario": "If there are many pools with accumulated fees, calling collectAllProtocolFees could hit gas limits, preventing the owner from collecting any fees. Alternatively, if one pool fails to transfer fees, it could cause the entire transaction to revert.",
+        "suggested_fix": "Implement pagination or batching for fee collection. Consider adding a parameter to limit the number of pools processed in a single transaction."
+      },
+      {
+        "type": "Reentrancy Risk",
+        "severity": "high",
+        "vulnerable_function": "collectAllProtocolFees",
+        "location": "Lines 257-263",
+        "explanation": "The function calls collectProtocolFees on multiple pools in sequence without proper reentrancy protection. If any pool contract has reentrancy vulnerabilities, this could be exploited.",
+        "attack_scenario": "An attacker could potentially reenter through a vulnerable pool contract during the collection process, leading to unexpected state changes or double spending.",
+        "suggested_fix": "Add reentrancy guards to the collectAllProtocolFees function."
+      },
+      {
+        "type": "Gas Limit Issues",
+        "severity": "high",
+        "vulnerable_function": "createPool",
+        "location": "Lines 55-73",
+        "explanation": "The createPool function adds new pools to the allPools array without any mechanism to handle gas costs that grow with the number of pools. As the number of pools increases, the gas cost of creating new pools will increase proportionally.",
+        "attack_scenario": "As the number of pools grows very large, creating new pools could become prohibitively expensive in gas, or might fail due to gas limits.",
+        "suggested_fix": "Consider alternative data structures or mechanisms that don't require appending to an ever-growing array."
+      },
+      {
+        "type": "Fee Module Integration",
+        "severity": "medium",
+        "vulnerable_function": "getSwapFee, getUnstakedFee, getProtocolFee",
+        "location": "Lines 162-204",
+        "explanation": "The fee module calls use excessivelySafeCall with fixed gas limits. If the fee module becomes more complex over time, these gas limits might become insufficient, causing the system to fall back to default fees unexpectedly.",
+        "attack_scenario": "A fee module upgrade could require more gas than allocated, causing the system to revert to default fees which might not be the intended economic model.",
+        "suggested_fix": "Consider making the gas limits configurable or dynamically adjustable based on the complexity of fee module operations."
+      },
+      {
+        "type": "Missing Validation",
+        "severity": "medium",
+        "vulnerable_function": "setGaugeManager",
+        "location": "Lines 47-49",
+        "explanation": "The function doesn't validate that the provided gauge manager address is a valid contract that implements the expected interface, which could lead to integration issues.",
+        "attack_scenario": "Setting an invalid gauge manager could cause all subsequent operations involving gauges to fail, potentially breaking fee calculation logic that depends on gauge status.",
+        "suggested_fix": "Add validation to ensure the provided address is a valid gauge manager contract that implements the expected interface."
+      }
+    ],
+    "overall_explanation": "The contract implements a Concentrated Liquidity factory with dynamic fee modules. While the core functionality appears well-designed, there are several critical and high severity vulnerabilities related to fee collection mechanisms, gas limits, and access controls. The most concerning issue is the collectAllProtocolFees function which could fail due to gas limits when the number of pools grows large, potentially making protocol fees permanently uncollectable. The fee module integration also has potential gas limit issues that could cause fallback to default fees unexpectedly. The contract needs additional reentrancy protection and more robust validation of external dependencies."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.85,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Governance Access Control\",\n      \"severity\": \"critical\",\n      \"vulnerable_function\": \"collectAllProtocolFees\",\n      \"location\": \"Lines 257-263\",\n      \"explanation\": \"The function allows the owner to collect all protocol fees from all pools at once, but uses a simple loop that could run out of gas or fail partway through if there are many pools. This could result in partial collection or complete failure to collect fees.\",\n      \"attack_scenario\": \"If there are many pools with accumulated fees, calling collectAllProtocolFees could hit gas limits, preventing the owner from collecting any fees. Alternatively, if one pool fails to transfer fees, it could cause the entire transaction to revert.\",\n      \"suggested_fix\": \"Implement pagination or batching for fee collection. Consider adding a parameter to limit the number of pools processed in a single transaction.\"\n    },\n    {\n      \"type\": \"Reentrancy Risk\",\n      \"severity\": \"high\",\n      \"vulnerable_function\": \"collectAllProtocolFees\",\n      \"location\": \"Lines 257-263\",\n      \"explanation\": \"The function calls collectProtocolFees on multiple pools in sequence without proper reentrancy protection. If any pool contract has reentrancy vulnerabilities, this could be exploited.\",\n      \"attack_scenario\": \"An attacker could potentially reenter through a vulnerable pool contract during the collection process, leading to unexpected state changes or double spending.\",\n      \"suggested_fix\": \"Add reentrancy guards to the collectAllProtocolFees function.\"\n    },\n    {\n      \"type\": \"Gas Limit Issues\",\n      \"severity\": \"high\",\n      \"vulnerable_function\": \"createPool\",\n      \"location\": \"Lines 55-73\",\n      \"explanation\": \"The createPool function adds new pools to the allPools array without any mechanism to handle gas costs that grow with the number of pools. As the number of pools increases, the gas cost of creating new pools will increase proportionally.\",\n      \"attack_scenario\": \"As the number of pools grows very large, creating new pools could become prohibitively expensive in gas, or might fail due to gas limits.\",\n      \"suggested_fix\": \"Consider alternative data structures or mechanisms that don't require appending to an ever-growing array.\"\n    },\n    {\n      \"type\": \"Fee Module Integration\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"getSwapFee, getUnstakedFee, getProtocolFee\",\n      \"location\": \"Lines 162-204\",\n      \"explanation\": \"The fee module calls use excessivelySafeCall with fixed gas limits. If the fee module becomes more complex over time, these gas limits might become insufficient, causing the system to fall back to default fees unexpectedly.\",\n      \"attack_scenario\": \"A fee module upgrade could require more gas than allocated, causing the system to revert to default fees which might not be the intended economic model.\",\n      \"suggested_fix\": \"Consider making the gas limits configurable or dynamically adjustable based on the complexity of fee module operations.\"\n    },\n    {\n      \"type\": \"Missing Validation\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"setGaugeManager\",\n      \"location\": \"Lines 47-49\",\n      \"explanation\": \"The function doesn't validate that the provided gauge manager address is a valid contract that implements the expected interface, which could lead to integration issues.\",\n      \"attack_scenario\": \"Setting an invalid gauge manager could cause all subsequent operations involving gauges to fail, potentially breaking fee calculation logic that depends on gauge status.\",\n      \"suggested_fix\": \"Add validation to ensure the provided address is a valid gauge manager contract that implements the expected interface.\"\n    }\n  ],\n  \"overall_explanation\": \"The contract implements a Concentrated Liquidity factory with dynamic fee modules. While the core functionality appears well-designed, there are several critical and high severity vulnerabilities related to fee collection mechanisms, gas limits, and access controls. The most concerning issue is the collectAllProtocolFees function which could fail due to gas limits when the number of pools grows large, potentially making protocol fees permanently uncollectable. The fee module integration also has potential gas limit issues that could cause fallback to default fees unexpectedly. The contract needs additional reentrancy protection and more robust validation of external dependencies.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": false,
+    "context_file_count": 0,
+    "has_protocol_doc": true
+  },
+  "api_metrics": {
+    "input_tokens": 3173,
+    "output_tokens": 939,
+    "latency_ms": 16152.945041656494
+  }
+}

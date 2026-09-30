@@ -1,0 +1,60 @@
+{
+  "sample_id": "gs_002",
+  "dataset": "gs",
+  "prompt_type": "context_protocol_cot",
+  "model": "gemini-3-pro-hyper-extended",
+  "timestamp": "2026-01-05T13:46:27.734132+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "logic_error",
+    "vulnerable_functions": [
+      "getSwapFee"
+    ],
+    "severity": "medium",
+    "description": "Governance can configure `DynamicSwapFeeModule` with fees up to 50%, but `CLFactory.getSwapFee` discards any value above 100_000 ppm (10%) and falls back to the tick-spacing default (often 500 ppm = 0.05%) without reverting or logging. Operators see the module reporting 20%, yet users continue paying the tiny default fee. The silent fallback misleads governance into believing higher fees are active. Impact - Governance believes a protective high fee is set (e.g., during launch anti-MEV), but the effective fee drops back to the default (e.g., 0.05%). - Traders are charged far less than intended, defeating protective or revenue objectives. - The misconfiguration has no on-chain signal, so the mistake can persist unnoticed. Root Cause - getSwapFee checks fee <= 100_000 ; larger values are ignored and the function returns tickSpacingToFee . - The module itself allows feeCap up to 500_000 (50%), so governance can set a value the factory immediately discards in favor of the default.",
+    "root_cause": "Governance can configure `DynamicSwapFeeModule` with fees up to 50%, but `CLFactory.getSwapFee` discards any value above 100_000 ppm (10%) and falls back to the tick-spacing default (often 500 ppm = 0.05%) without reverting or logging. Operators see the module reporting 20%, yet users continue paying the tiny default fee. The silent fallback misleads governance into believing higher fees are active. Impact - Governance believes a protective high fee is set (e.g., during launch anti-MEV), but the effective fee drops back to the default (e.g., 0.05%). - Traders are charged far less than intended, defeating protective or revenue objectives. - The misconfiguration has no on-chain signal, so the mistake can persist unnoticed. Root Cause - getSwapFee checks fee <= 100_000 ; larger values are ignored and the function returns tickSpacingToFee . - The module itself allows feeCap up to 500_000 (50%), so governance can set a value the factory immediately discards in favor of the default.",
+    "attack_scenario": "cd cl forge test --match-path test/PoC_DynamicFee_ClampToDefault.t.sol -vvv The PoC lifts the module cap, sets a 20% custom fee, and shows that `DynamicSwapFeeModule.getFee` returns 200_000 while `CLFactory.getSwapFee` still returns the base 500 ppm. PoC source ( `cl/test/PoC_DynamicFee_ClampToDefault.t.sol` ): // SPDX-License-Identifier: MIT pragma solidity 0.7.6; pragma abicoder v2; import \"forge-std/Test.sol\"; import {C4PoCTestbed} from \"./C4PoCTestbed.t.sol\"; import {DynamicSwapFeeModule} from \"contracts/core/fees/DynamicSwapFeeModule.sol\"; contract PoC_DynamicFee_ClampToDefault is C4PoCTestbed { address internal pool; function setUp() public override { super.setUp(); pool = poolFactory.createPool(USDC, DAI, 100, uint160(2 ** 96)); require(pool != address(0), \"pool not created\"); } function testFactoryClampsFeeAboveTenPercent() public { address manager = poolFactory.swapFeeManager(); vm.prank(manager); swapFeeModule.setFeeCap(pool, 500_000); // raise module cap to 50% vm.prank(manager); swapFeeModule.setScalingFactor(pool, 1); // ensure positive TWAP delta doesn't zero fee uint24 highFee = 200_000; // 20% vm.prank(manager); swapFeeModule.setCustomFee(pool, highFee); uint24 moduleFee = swapFeeModule.getFee(pool); assertEq(uint256(moduleFee), uint256(highFee), \"module reports configured fee\"); uint24 factoryFee = poolFactory.getSwapFee(pool); assertEq(uint256(factoryFee), 500, \"factory silently clamps to tick-spacing default\"); } }",
+    "fix_description": "Either revert when the module returns > 100_000 or raise the factory ceiling to match the module\u2019s cap. Emit events or add admin tooling to surface out-of-range configurations so operators can correct them. Hybra Finance mitigated: Added setMaxFee() function to make the fee cap configurable by the owner (up to 50%). This replaces the hardcoded limit and allows governance to adjust the maximum dynamic fee when needed.",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.95,
+    "vulnerabilities": [
+      {
+        "type": "Input Validation",
+        "severity": "medium",
+        "vulnerable_function": "setGaugeManager",
+        "location": "CLFactory.sol",
+        "explanation": "The `setGaugeManager` function lacks a check to ensure the `_gaugeManager` address is not `address(0)`. This is inconsistent with other setter functions like `setSwapFeeManager` and `setOwner` which include this check. If the owner accidentally sets the gauge manager to `address(0)`, calls to `getUnstakedFee` and `getProtocolFee` will revert. This is because these functions call `gaugeManager.isGaugeAliveForPool(pool)`. In Solidity, a high-level call to `address(0)` returns success with empty data, but the EVM will revert when trying to decode the expected `bool` return value from empty bytes. Since pools likely rely on these functions to calculate fees during swaps, this would cause a global Denial of Service for all trading.",
+        "attack_scenario": "1. The protocol owner calls `setGaugeManager(address(0))` due to an operational error or script bug.\n2. The `gaugeManager` state variable is updated to `address(0)`.\n3. Users attempt to perform swaps in any pool.\n4. The pool calls `factory.getUnstakedFee()` or `factory.getProtocolFee()`.\n5. The factory attempts to call `isGaugeAliveForPool` on `address(0)`.\n6. The call reverts due to return data decoding failure.\n7. The swap transaction reverts, halting the protocol.",
+        "suggested_fix": "Add `require(_gaugeManager != address(0));` to the `setGaugeManager` function."
+      },
+      {
+        "type": "Denial of Service",
+        "severity": "low",
+        "vulnerable_function": "collectAllProtocolFees",
+        "location": "CLFactory.sol",
+        "explanation": "The `collectAllProtocolFees` function iterates through the `allPools` array in a single transaction. As the number of deployed pools increases, the gas required to execute this function will eventually exceed the block gas limit. Once this threshold is reached, the function becomes permanently unusable.",
+        "attack_scenario": "1. A large number of pools are created over time (legitimately or by an attacker willing to spend gas).\n2. The `allPools` array grows large (e.g., > 3000 pools).\n3. The owner attempts to call `collectAllProtocolFees`.\n4. The transaction runs out of gas and reverts.\n5. The owner is forced to collect fees manually pool-by-pool using `collectProtocolFees`, rendering the convenience function broken.",
+        "suggested_fix": "Implement a batch collection function that accepts a `start` and `end` index to iterate through `allPools` in chunks, or remove the function in favor of off-chain iteration."
+      }
+    ],
+    "overall_explanation": "The contract is generally well-structured and follows standard patterns for Uniswap V3-style factories. However, it contains a significant oversight in the `setGaugeManager` function where input validation is missing, unlike other similar functions in the contract. This creates a fragility where a simple admin error can brick the entire protocol's fee logic. Additionally, the `collectAllProtocolFees` function contains an unbounded loop, which is a known anti-pattern that will eventually lead to the function becoming unusable. The use of `excessivelySafeStaticCall` for external fee modules is a good security practice that prevents external modules from halting the factory, but this protection was not extended to the `gaugeManager` integration."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.95,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Input Validation\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"setGaugeManager\",\n      \"location\": \"CLFactory.sol\",\n      \"explanation\": \"The `setGaugeManager` function lacks a check to ensure the `_gaugeManager` address is not `address(0)`. This is inconsistent with other setter functions like `setSwapFeeManager` and `setOwner` which include this check. If the owner accidentally sets the gauge manager to `address(0)`, calls to `getUnstakedFee` and `getProtocolFee` will revert. This is because these functions call `gaugeManager.isGaugeAliveForPool(pool)`. In Solidity, a high-level call to `address(0)` returns success with empty data, but the EVM will revert when trying to decode the expected `bool` return value from empty bytes. Since pools likely rely on these functions to calculate fees during swaps, this would cause a global Denial of Service for all trading.\",\n      \"attack_scenario\": \"1. The protocol owner calls `setGaugeManager(address(0))` due to an operational error or script bug.\\n2. The `gaugeManager` state variable is updated to `address(0)`.\\n3. Users attempt to perform swaps in any pool.\\n4. The pool calls `factory.getUnstakedFee()` or `factory.getProtocolFee()`.\\n5. The factory attempts to call `isGaugeAliveForPool` on `address(0)`.\\n6. The call reverts due to return data decoding failure.\\n7. The swap transaction reverts, halting the protocol.\",\n      \"suggested_fix\": \"Add `require(_gaugeManager != address(0));` to the `setGaugeManager` function.\"\n    },\n    {\n      \"type\": \"Denial of Service\",\n      \"severity\": \"low\",\n      \"vulnerable_function\": \"collectAllProtocolFees\",\n      \"location\": \"CLFactory.sol\",\n      \"explanation\": \"The `collectAllProtocolFees` function iterates through the `allPools` array in a single transaction. As the number of deployed pools increases, the gas required to execute this function will eventually exceed the block gas limit. Once this threshold is reached, the function becomes permanently unusable.\",\n      \"attack_scenario\": \"1. A large number of pools are created over time (legitimately or by an attacker willing to spend gas).\\n2. The `allPools` array grows large (e.g., > 3000 pools).\\n3. The owner attempts to call `collectAllProtocolFees`.\\n4. The transaction runs out of gas and reverts.\\n5. The owner is forced to collect fees manually pool-by-pool using `collectProtocolFees`, rendering the convenience function broken.\",\n      \"suggested_fix\": \"Implement a batch collection function that accepts a `start` and `end` index to iterate through `allPools` in chunks, or remove the function in favor of off-chain iteration.\"\n    }\n  ],\n  \"overall_explanation\": \"The contract is generally well-structured and follows standard patterns for Uniswap V3-style factories. However, it contains a significant oversight in the `setGaugeManager` function where input validation is missing, unlike other similar functions in the contract. This creates a fragility where a simple admin error can brick the entire protocol's fee logic. Additionally, the `collectAllProtocolFees` function contains an unbounded loop, which is a known anti-pattern that will eventually lead to the function becoming unusable. The use of `excessivelySafeStaticCall` for external fee modules is a good security practice that prevents external modules from halting the factory, but this protection was not extended to the `gaugeManager` integration.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": false,
+    "context_file_count": 0,
+    "has_protocol_doc": true
+  },
+  "api_metrics": {
+    "input_tokens": 3671,
+    "output_tokens": 13076,
+    "latency_ms": 123469.33817863464
+  }
+}

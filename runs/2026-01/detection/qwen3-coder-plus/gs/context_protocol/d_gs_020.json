@@ -1,0 +1,60 @@
+{
+  "sample_id": "gs_020",
+  "dataset": "gs",
+  "prompt_type": "context_protocol",
+  "model": "qwen3-coder-plus",
+  "timestamp": "2026-01-05T13:46:13.415923+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "signature_replay",
+    "vulnerable_functions": [
+      "beforeSwap"
+    ],
+    "severity": "medium",
+    "description": "Both UniswapV4KEMHook and PancakeSwapInfinityKEMHook rebuild a quote digest by hashing sender, key, params.zeroForOne, maxAmountIn, maxExchangeRate, exchangeRateDenom, nonce, and expiryTime. The tuple ties the authorization to the router (sender), the full PoolKey (which includes the hook address), trade direction, price and input caps, nonce and expiry. Crucially, no domain separator is folded in: chain ID, deployment salt, and contract identity outside key are absent. If the same hook instance (or the same PoolKey) is deployed on multiple networks, as CREATE3-based salt mining allows, an attacker can lift any valid signature+nonce from chain A and replay it on chain B. Because the digest matches, SignatureChecker.isValidSignatureNow succeeds and the swap executes without the signer's intention. That breaks the core guarantee that signed quotes are single-instance authorizations, allowing cross-chain replay swaps.",
+    "root_cause": "Both UniswapV4KEMHook and PancakeSwapInfinityKEMHook rebuild a quote digest by hashing sender, key, params.zeroForOne, maxAmountIn, maxExchangeRate, exchangeRateDenom, nonce, and expiryTime. The tuple ties the authorization to the router (sender), the full PoolKey (which includes the hook address), trade direction, price and input caps, nonce and expiry. Crucially, no domain separator is folded in: chain ID, deployment salt, and contract identity outside key are absent. If the same hook instance (or the same PoolKey) is deployed on multiple networks, as CREATE3-based salt mining allows, an attacker can lift any valid signature+nonce from chain A and replay it on chain B. Because the digest matches, SignatureChecker.isValidSignatureNow succeeds and the swap executes without the signer's intention. That breaks the core guarantee that signed quotes are single-instance authorizations, allowing cross-chain replay swaps.",
+    "attack_scenario": "1. Kyber deploys UniswapV4KEMHook on Ethereum mainnet with a specific PoolKey\n2. Same hook (or same PoolKey configuration) is deployed on Arbitrum using CREATE3 salt mining to get matching address\n3. User requests a quote on Ethereum, quoteSigner signs: keccak256(abi.encode(sender, key, zeroForOne, maxAmountIn, maxExchangeRate, exchangeRateDenom, nonce, expiryTime))\n4. User broadcasts swap transaction on Ethereum mainnet\n5. Attacker observes the transaction in Ethereum mempool, extracts signature and hookData\n6. Attacker submits identical calldata on Arbitrum before expiryTime\n7. On Arbitrum: sender (router) matches, key matches (same pool configuration), all other parameters match\n8. SignatureChecker.isValidSignatureNow(quoteSigner, digest, signature) returns true\n9. Swap executes on Arbitrum without signer's intention\n10. If nonce != 0, Ethereum swap may still succeed (different nonce storage per chain), causing double execution",
+    "fix_description": "Introduce domain separation for the signed payload in both hooks. Adopt an EIP712 domain that at minimum commits to chainid. This ensures signatures are only valid on the intended chain.",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.85,
+    "vulnerabilities": [
+      {
+        "type": "Signature Validation Bypass",
+        "severity": "critical",
+        "vulnerable_function": "beforeSwap",
+        "location": "UniswapV4KEMHook.beforeSwap",
+        "explanation": "The contract validates signatures against a quoteSigner address but uses an unordered nonce system that doesn't properly track which quoter generated which nonce. An attacker can obtain a valid signature from any quoter and replay it with a nonce that hasn't been used yet, potentially bypassing quote-specific validation.",
+        "attack_scenario": "1. Get a valid signature from quoter A for a favorable trade 2. Wait for another quoter B to use some nonces 3. Submit the signature from quoter A with a nonce that quoter A never used but is still available 4. The signature validation passes even though it was meant for a different quoter context",
+        "suggested_fix": "Implement per-quoter nonce tracking by modifying the nonce system to use a mapping of quoter address to its own nonce sequence, or include the quoter address in the signature validation context."
+      },
+      {
+        "type": "Economic Exploitation - Exchange Rate Manipulation",
+        "severity": "high",
+        "vulnerable_function": "afterSwap",
+        "location": "UniswapV4KEMHook.afterSwap",
+        "explanation": "The contract mints EG tokens based on the difference between expected and actual swap amounts, but there's no validation that maxExchangeRate and exchangeRateDenom are properly scaled. This could allow manipulation of the EG token minting logic.",
+        "attack_scenario": "1. An attacker crafts a quote with extremely small exchangeRateDenom value (close to 0) 2. Executes swap where actual output is slightly better than the manipulated expected output 3. This creates disproportionately large EG token rewards due to division by near-zero denominator",
+        "suggested_fix": "Add validation in beforeSwap to ensure exchangeRateDenom is above a minimum threshold and that the exchange rate parameters are within reasonable bounds."
+      }
+    ],
+    "overall_explanation": "The contract has critical vulnerabilities in its signature validation system where nonces are not properly attributed to specific quoters, allowing signature replay attacks. Additionally, there's economic risk from exchange rate parameter manipulation that could lead to disproportionate EG token minting."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.85,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Signature Validation Bypass\",\n      \"severity\": \"critical\",\n      \"vulnerable_function\": \"beforeSwap\",\n      \"location\": \"UniswapV4KEMHook.beforeSwap\",\n      \"explanation\": \"The contract validates signatures against a quoteSigner address but uses an unordered nonce system that doesn't properly track which quoter generated which nonce. An attacker can obtain a valid signature from any quoter and replay it with a nonce that hasn't been used yet, potentially bypassing quote-specific validation.\",\n      \"attack_scenario\": \"1. Get a valid signature from quoter A for a favorable trade 2. Wait for another quoter B to use some nonces 3. Submit the signature from quoter A with a nonce that quoter A never used but is still available 4. The signature validation passes even though it was meant for a different quoter context\",\n      \"suggested_fix\": \"Implement per-quoter nonce tracking by modifying the nonce system to use a mapping of quoter address to its own nonce sequence, or include the quoter address in the signature validation context.\"\n    },\n    {\n      \"type\": \"Economic Exploitation - Exchange Rate Manipulation\",\n      \"severity\": \"high\",\n      \"vulnerable_function\": \"afterSwap\",\n      \"location\": \"UniswapV4KEMHook.afterSwap\",\n      \"explanation\": \"The contract mints EG tokens based on the difference between expected and actual swap amounts, but there's no validation that maxExchangeRate and exchangeRateDenom are properly scaled. This could allow manipulation of the EG token minting logic.\",\n      \"attack_scenario\": \"1. An attacker crafts a quote with extremely small exchangeRateDenom value (close to 0) 2. Executes swap where actual output is slightly better than the manipulated expected output 3. This creates disproportionately large EG token rewards due to division by near-zero denominator\",\n      \"suggested_fix\": \"Add validation in beforeSwap to ensure exchangeRateDenom is above a minimum threshold and that the exchange rate parameters are within reasonable bounds.\"\n    }\n  ],\n  \"overall_explanation\": \"The contract has critical vulnerabilities in its signature validation system where nonces are not properly attributed to specific quoters, allowing signature replay attacks. Additionally, there's economic risk from exchange rate parameter manipulation that could lead to disproportionate EG token minting.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": false,
+    "context_file_count": 0,
+    "has_protocol_doc": true
+  },
+  "api_metrics": {
+    "input_tokens": 2336,
+    "output_tokens": 523,
+    "latency_ms": 13287.158966064453
+  }
+}

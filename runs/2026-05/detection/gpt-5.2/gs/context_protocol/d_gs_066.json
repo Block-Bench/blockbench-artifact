@@ -1,0 +1,51 @@
+{
+  "sample_id": "gs_066",
+  "dataset": "gs",
+  "prompt_type": "context_protocol",
+  "model": "gpt-5.2",
+  "timestamp": "2026-05-25T15:45:52.350583+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "arithmetic_error",
+    "vulnerable_functions": [
+      "rebaseOraclePack"
+    ],
+    "severity": "medium",
+    "description": "UPPER_118BITS_MASK is 130 bits instead of 138 bits, inadvertently clearing portions of the 88-bit EMA field and 2-bit lockMode during rebasing.",
+    "root_cause": "UPPER_118BITS_MASK is 130 bits instead of 138 bits, inadvertently clearing portions of the 88-bit EMA field and 2-bit lockMode during rebasing.",
+    "attack_scenario": "",
+    "fix_description": "Extend mask to 138 bits to correctly preserve all upper fields.",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.72,
+    "vulnerabilities": [
+      {
+        "type": "Oracle corruption via out-of-range residuals during rebase (bit-truncation)",
+        "severity": "high",
+        "vulnerable_function": "rebaseOraclePack",
+        "location": "OraclePackLibrary.rebaseOraclePack",
+        "explanation": "Residuals are stored as signed 12-bit values (range [-2048, 2047]). During a rebase, the library shifts the reference tick to the current median and recomputes each residual as `newEntry = oldResidual - deltaOffset`, where `deltaOffset = newReferenceTick - oldReferenceTick`. Although `oldResidual` and `deltaOffset` are each within the 12-bit range, their difference can be outside it (down to -4095 or up to +4095).\n\nInstead of enforcing the 12-bit signed range, the implementation packs `newEntry` with `uint24(newEntry) & 0x0FFF`, which truncates/wraps out-of-range values modulo 2^12. This can flip sign and drastically change magnitude (e.g., -4095 becomes +1), corrupting the stored observation set.\n\nCritically, `rebaseOraclePack` preserves the existing `orderMap` under the assumption that subtracting a constant preserves ordering. That assumption breaks once truncation occurs, so `residualTickOrdered()` and `getMedianTick()` can return incorrect medians/EMAs thereafter. If the oracle output is used for pricing/risk checks, this becomes an economic exploit (manipulated oracle).",
+        "attack_scenario": "1) Attacker manipulates the underlying pool tick at each epoch boundary (64s) and triggers the protocol path that calls `computeInternalMedian()`/`insertObservation()` to record observations.\n2) Over multiple updates, attacker engineers the 8 stored residuals so that: (a) the median residual (rank3/rank4) is near +2047 (so `deltaOffset` on rebase is near +2047), and (b) at least one stored residual is near -2048.\n3) Attacker then moves the tick enough to trigger the residual-threshold condition so `insertObservation()` calls `rebaseOraclePack()`.\n4) In `rebaseOraclePack()`, the low residual recomputes to about `-2048 - 2047 = -4095`, which is truncated to `0x001` (+1). Ordering is now wrong but `orderMap` is unchanged.\n5) Subsequent calls to `getMedianTick()`/`getOracleTicks()` return a manipulated median/EMA-derived tick. Attacker uses the distorted oracle in whatever downstream operation depends on it (e.g., entering/exiting positions at favorable prices, bypassing risk checks).",
+        "suggested_fix": "Enforce that all rebased residuals remain representable as signed 12-bit values before packing, and prevent truncation from ever occurring:\n- Compute `newEntry` and `require(newEntry >= -2048 && newEntry <= 2047)`; if violated, choose a different `_newReferenceTick` that guarantees all residuals fit (e.g., reference near mid of min/max residuals), or perform iterative rebasing until all fit.\n- Alternatively, redesign packing to store residuals with more bits (e.g., int16) if protocol constraints allow.\n- Add an invariant check that `orderMap` remains valid after rebase (or recompute `orderMap` from the rebased residuals)."
+      }
+    ],
+    "overall_explanation": "The library is mostly arithmetic/bit-packing logic, but `rebaseOraclePack()` can produce out-of-range residuals and silently truncates them into 12 bits. This breaks the core invariant (ordered residuals consistent with `orderMap`) and can permanently corrupt the oracle\u2019s median/EMA outputs. If any protocol component relies on these outputs for value transfer, pricing, or risk checks, an attacker who can influence recorded ticks over time can manipulate outcomes."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.72,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Oracle corruption via out-of-range residuals during rebase (bit-truncation)\",\n      \"severity\": \"high\",\n      \"vulnerable_function\": \"rebaseOraclePack\",\n      \"location\": \"OraclePackLibrary.rebaseOraclePack\",\n      \"explanation\": \"Residuals are stored as signed 12-bit values (range [-2048, 2047]). During a rebase, the library shifts the reference tick to the current median and recomputes each residual as `newEntry = oldResidual - deltaOffset`, where `deltaOffset = newReferenceTick - oldReferenceTick`. Although `oldResidual` and `deltaOffset` are each within the 12-bit range, their difference can be outside it (down to -4095 or up to +4095).\\n\\nInstead of enforcing the 12-bit signed range, the implementation packs `newEntry` with `uint24(newEntry) & 0x0FFF`, which truncates/wraps out-of-range values modulo 2^12. This can flip sign and drastically change magnitude (e.g., -4095 becomes +1), corrupting the stored observation set.\\n\\nCritically, `rebaseOraclePack` preserves the existing `orderMap` under the assumption that subtracting a constant preserves ordering. That assumption breaks once truncation occurs, so `residualTickOrdered()` and `getMedianTick()` can return incorrect medians/EMAs thereafter. If the oracle output is used for pricing/risk checks, this becomes an economic exploit (manipulated oracle).\",\n      \"attack_scenario\": \"1) Attacker manipulates the underlying pool tick at each epoch boundary (64s) and triggers the protocol path that calls `computeInternalMedian()`/`insertObservation()` to record observations.\\n2) Over multiple updates, attacker engineers the 8 stored residuals so that: (a) the median residual (rank3/rank4) is near +2047 (so `deltaOffset` on rebase is near +2047), and (b) at least one stored residual is near -2048.\\n3) Attacker then moves the tick enough to trigger the residual-threshold condition so `insertObservation()` calls `rebaseOraclePack()`.\\n4) In `rebaseOraclePack()`, the low residual recomputes to about `-2048 - 2047 = -4095`, which is truncated to `0x001` (+1). Ordering is now wrong but `orderMap` is unchanged.\\n5) Subsequent calls to `getMedianTick()`/`getOracleTicks()` return a manipulated median/EMA-derived tick. Attacker uses the distorted oracle in whatever downstream operation depends on it (e.g., entering/exiting positions at favorable prices, bypassing risk checks).\",\n      \"suggested_fix\": \"Enforce that all rebased residuals remain representable as signed 12-bit values before packing, and prevent truncation from ever occurring:\\n- Compute `newEntry` and `require(newEntry >= -2048 && newEntry <= 2047)`; if violated, choose a different `_newReferenceTick` that guarantees all residuals fit (e.g., reference near mid of min/max residuals), or perform iterative rebasing until all fit.\\n- Alternatively, redesign packing to store residuals with more bits (e.g., int16) if protocol constraints allow.\\n- Add an invariant check that `orderMap` remains valid after rebase (or recompute `orderMap` from the rebased residuals).\"\n    }\n  ],\n  \"overall_explanation\": \"The library is mostly arithmetic/bit-packing logic, but `rebaseOraclePack()` can produce out-of-range residuals and silently truncates them into 12 bits. This breaks the core invariant (ordered residuals consistent with `orderMap`) and can permanently corrupt the oracle\u2019s median/EMA outputs. If any protocol component relies on these outputs for value transfer, pricing, or risk checks, an attacker who can influence recorded ticks over time can manipulate outcomes.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": false,
+    "context_file_count": 0,
+    "has_protocol_doc": false
+  },
+  "api_metrics": {
+    "input_tokens": 7663,
+    "output_tokens": 5766,
+    "latency_ms": 88871.11186981201
+  }
+}

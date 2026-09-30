@@ -1,0 +1,78 @@
+{
+  "sample_id": "gs_009",
+  "dataset": "gs",
+  "prompt_type": "context_protocol_cot",
+  "model": "claude-opus-4-5",
+  "timestamp": "2026-01-05T13:46:17.647135+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "logic_error",
+    "vulnerable_functions": [
+      "_checkpoint"
+    ],
+    "severity": "medium",
+    "description": "`_checkpoint` creates a new epoch with the same timestamp for `increase_amount`, ignoring the new lock in `balanceOfNFT`, reducing voting power.",
+    "root_cause": "`_checkpoint` creates a new epoch with the same timestamp for `increase_amount`, ignoring the new lock in `balanceOfNFT`, reducing voting power.",
+    "attack_scenario": "A test locks 500e18, increases by 500e18 in one tx, and shows reduced bribe rewards compared to separate locks.",
+    "fix_description": "In `_checkpoint`, overwrite the latest point if timestamps match, else append a new one. Status: Mitigation confirmed.",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.92,
+    "vulnerabilities": [
+      {
+        "type": "Token Loss via Rounding",
+        "severity": "medium",
+        "vulnerable_function": "multiSplit",
+        "location": "VotingEscrow.multiSplit",
+        "explanation": "The multiSplit function distributes the original locked amount proportionally based on weights, but due to integer division rounding down, the sum of all new locked amounts can be less than the original amount. The difference (dust) is permanently lost and not accounted for anywhere.",
+        "attack_scenario": "1. User has a veNFT with 1000 tokens locked. 2. User calls multiSplit with amounts [333, 333, 334] (total weight 1000). 3. Each new NFT gets: NFT1 = 1000 * 333 / 1000 = 333, NFT2 = 1000 * 333 / 1000 = 333, NFT3 = 1000 * 334 / 1000 = 334. 4. Total = 1000, no loss in this case. But with amounts [1, 1, 1] on 100 tokens: NFT1 = 100 * 1 / 3 = 33, NFT2 = 33, NFT3 = 33. Total = 99, 1 token lost. 5. With larger amounts and more splits, losses accumulate. The tokens remain in the contract but are not tracked in supply or any user's locked balance.",
+        "suggested_fix": "Add the remaining dust to the last created NFT: Calculate total distributed, then add (originalAmount - totalDistributed) to the last NFT's locked amount. Alternatively, require that the sum of calculated amounts equals the original amount."
+      },
+      {
+        "type": "Incorrect EIP-712 Domain Separator",
+        "severity": "medium",
+        "vulnerable_function": "delegateBySig",
+        "location": "VotingEscrow.delegateBySig",
+        "explanation": "The DOMAIN_TYPEHASH includes 'chainId' but the actual domain separator encoding includes an extra keccak256(bytes(version)) that doesn't match the typehash. The typehash says 'EIP712Domain(string name,uint256 chainId,address verifyingContract)' but the encoding includes version, creating a mismatch that could cause signature verification issues or cross-chain replay attacks.",
+        "attack_scenario": "1. The DOMAIN_TYPEHASH declares: name, chainId, verifyingContract (3 fields). 2. The actual encoding uses: name, version, chainId, verifyingContract (4 fields). 3. This mismatch means signatures created following the declared typehash won't verify correctly. 4. Users attempting to use delegateBySig with properly constructed signatures following EIP-712 spec will have their transactions fail. 5. Additionally, if the version field is not properly validated, it could lead to signature confusion.",
+        "suggested_fix": "Update DOMAIN_TYPEHASH to include version: keccak256('EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)') to match the actual encoding."
+      },
+      {
+        "type": "Supply Accounting Mismatch",
+        "severity": "medium",
+        "vulnerable_function": "multiSplit",
+        "location": "VotingEscrow.multiSplit",
+        "explanation": "When multiSplit burns the original NFT and creates new ones, the supply variable is not updated. The _burn function doesn't modify supply, and _createSplitNFT doesn't add to supply. However, the original lock's supply contribution was already counted. This creates an inconsistency where the global supply tracking becomes inaccurate over time.",
+        "attack_scenario": "1. User creates lock with 1000 tokens, supply increases by 1000. 2. User calls multiSplit to split into 2 NFTs. 3. Original NFT is burned via _checkpoint with zero locked balance, but supply is not decremented. 4. New NFTs are created but _createSplitNFT doesn't increment supply (it only calls _checkpoint). 5. The supply variable remains at 1000, which is correct in this case. However, if there's any rounding loss from the split, supply will be overstated compared to actual locked tokens. 6. Over many splits, this discrepancy accumulates.",
+        "suggested_fix": "Ensure supply accounting is consistent: either explicitly track supply changes in multiSplit, or verify that the checkpoint mechanism properly handles supply for split operations. Add a check that sum of new locked amounts equals original amount."
+      },
+      {
+        "type": "Permanent Lock Balance Accounting Error",
+        "severity": "high",
+        "vulnerable_function": "multiSplit",
+        "location": "VotingEscrow.multiSplit",
+        "explanation": "When splitting a permanently locked NFT via multiSplit, the permanentLockBalance is not adjusted. The original permanent NFT is burned (which should decrease permanentLockBalance) and new permanent NFTs are created (which should be tracked), but neither operation updates permanentLockBalance. This corrupts the permanent lock accounting.",
+        "attack_scenario": "1. User has a permanently locked NFT with 1000 tokens. permanentLockBalance = 1000. 2. User calls multiSplit to split into 2 NFTs of 500 each. 3. Original NFT is burned but permanentLockBalance is not decremented. 4. New NFTs are created with isPermanent=true but permanentLockBalance is not incremented for them. 5. permanentLockBalance remains 1000, but now there are 2 NFTs each thinking they contribute to permanent balance. 6. When these NFTs are unlocked via unlockPermanent, each will try to decrement permanentLockBalance by 500, causing underflow on the second unlock or corrupted state.",
+        "suggested_fix": "In multiSplit, when dealing with permanent locks: 1) Decrement permanentLockBalance by the original amount when burning. 2) In _createSplitNFT, increment permanentLockBalance for each new permanent NFT created. Or handle it atomically in multiSplit."
+      }
+    ],
+    "overall_explanation": "The VotingEscrow contract has several accounting vulnerabilities. The most critical is the permanentLockBalance not being updated during multiSplit operations on permanent locks, which will corrupt the protocol's permanent lock tracking. Additionally, the multiSplit function has rounding issues that can cause token loss, and the EIP-712 domain separator has a mismatch between the declared typehash and actual encoding. These issues could lead to loss of user funds, corrupted protocol state, and failed signature verifications."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "{\"verdict\":\"vulnerable\",\"confidence\":0.92,\"vulnerabilities\":[{\"type\":\"Token Loss via Rounding\",\"severity\":\"medium\",\"vulnerable_function\":\"multiSplit\",\"location\":\"VotingEscrow.multiSplit\",\"explanation\":\"The multiSplit function distributes the original locked amount proportionally based on weights, but due to integer division rounding down, the sum of all new locked amounts can be less than the original amount. The difference (dust) is permanently lost and not accounted for anywhere.\",\"attack_scenario\":\"1. User has a veNFT with 1000 tokens locked. 2. User calls multiSplit with amounts [333, 333, 334] (total weight 1000). 3. Each new NFT gets: NFT1 = 1000 * 333 / 1000 = 333, NFT2 = 1000 * 333 / 1000 = 333, NFT3 = 1000 * 334 / 1000 = 334. 4. Total = 1000, no loss in this case. But with amounts [1, 1, 1] on 100 tokens: NFT1 = 100 * 1 / 3 = 33, NFT2 = 33, NFT3 = 33. Total = 99, 1 token lost. 5. With larger amounts and more splits, losses accumulate. The tokens remain in the contract but are not tracked in supply or any user's locked balance.\",\"suggested_fix\":\"Add the remaining dust to the last created NFT: Calculate total distributed, then add (originalAmount - totalDistributed) to the last NFT's locked amount. Alternatively, require that the sum of calculated amounts equals the original amount.\"},{\"type\":\"Incorrect EIP-712 Domain Separator\",\"severity\":\"medium\",\"vulnerable_function\":\"delegateBySig\",\"location\":\"VotingEscrow.delegateBySig\",\"explanation\":\"The DOMAIN_TYPEHASH includes 'chainId' but the actual domain separator encoding includes an extra keccak256(bytes(version)) that doesn't match the typehash. The typehash says 'EIP712Domain(string name,uint256 chainId,address verifyingContract)' but the encoding includes version, creating a mismatch that could cause signature verification issues or cross-chain replay attacks.\",\"attack_scenario\":\"1. The DOMAIN_TYPEHASH declares: name, chainId, verifyingContract (3 fields). 2. The actual encoding uses: name, version, chainId, verifyingContract (4 fields). 3. This mismatch means signatures created following the declared typehash won't verify correctly. 4. Users attempting to use delegateBySig with properly constructed signatures following EIP-712 spec will have their transactions fail. 5. Additionally, if the version field is not properly validated, it could lead to signature confusion.\",\"suggested_fix\":\"Update DOMAIN_TYPEHASH to include version: keccak256('EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)') to match the actual encoding.\"},{\"type\":\"Supply Accounting Mismatch\",\"severity\":\"medium\",\"vulnerable_function\":\"multiSplit\",\"location\":\"VotingEscrow.multiSplit\",\"explanation\":\"When multiSplit burns the original NFT and creates new ones, the supply variable is not updated. The _burn function doesn't modify supply, and _createSplitNFT doesn't add to supply. However, the original lock's supply contribution was already counted. This creates an inconsistency where the global supply tracking becomes inaccurate over time.\",\"attack_scenario\":\"1. User creates lock with 1000 tokens, supply increases by 1000. 2. User calls multiSplit to split into 2 NFTs. 3. Original NFT is burned via _checkpoint with zero locked balance, but supply is not decremented. 4. New NFTs are created but _createSplitNFT doesn't increment supply (it only calls _checkpoint). 5. The supply variable remains at 1000, which is correct in this case. However, if there's any rounding loss from the split, supply will be overstated compared to actual locked tokens. 6. Over many splits, this discrepancy accumulates.\",\"suggested_fix\":\"Ensure supply accounting is consistent: either explicitly track supply changes in multiSplit, or verify that the checkpoint mechanism properly handles supply for split operations. Add a check that sum of new locked amounts equals original amount.\"},{\"type\":\"Permanent Lock Balance Accounting Error\",\"severity\":\"high\",\"vulnerable_function\":\"multiSplit\",\"location\":\"VotingEscrow.multiSplit\",\"explanation\":\"When splitting a permanently locked NFT via multiSplit, the permanentLockBalance is not adjusted. The original permanent NFT is burned (which should decrease permanentLockBalance) and new permanent NFTs are created (which should be tracked), but neither operation updates permanentLockBalance. This corrupts the permanent lock accounting.\",\"attack_scenario\":\"1. User has a permanently locked NFT with 1000 tokens. permanentLockBalance = 1000. 2. User calls multiSplit to split into 2 NFTs of 500 each. 3. Original NFT is burned but permanentLockBalance is not decremented. 4. New NFTs are created with isPermanent=true but permanentLockBalance is not incremented for them. 5. permanentLockBalance remains 1000, but now there are 2 NFTs each thinking they contribute to permanent balance. 6. When these NFTs are unlocked via unlockPermanent, each will try to decrement permanentLockBalance by 500, causing underflow on the second unlock or corrupted state.\",\"suggested_fix\":\"In multiSplit, when dealing with permanent locks: 1) Decrement permanentLockBalance by the original amount when burning. 2) In _createSplitNFT, increment permanentLockBalance for each new permanent NFT created. Or handle it atomically in multiSplit.\"}],\"overall_explanation\":\"The VotingEscrow contract has several accounting vulnerabilities. The most critical is the permanentLockBalance not being updated during multiSplit operations on permanent locks, which will corrupt the protocol's permanent lock tracking. Additionally, the multiSplit function has rounding issues that can cause token loss, and the EIP-712 domain separator has a mismatch between the declared typehash and actual encoding. These issues could lead to loss of user funds, corrupted protocol state, and failed signature verifications.\"}"
+  },
+  "context_info": {
+    "has_context_files": false,
+    "context_file_count": 0,
+    "has_protocol_doc": true
+  },
+  "api_metrics": {
+    "input_tokens": 17053,
+    "output_tokens": 1501,
+    "latency_ms": 27946.91777229309
+  }
+}

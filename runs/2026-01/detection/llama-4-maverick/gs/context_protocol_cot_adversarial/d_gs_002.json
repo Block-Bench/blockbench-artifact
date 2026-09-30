@@ -1,0 +1,69 @@
+{
+  "sample_id": "gs_002",
+  "dataset": "gs",
+  "prompt_type": "context_protocol_cot_adversarial",
+  "model": "llama-4-maverick",
+  "timestamp": "2026-01-05T15:28:08.158500+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "logic_error",
+    "vulnerable_functions": [
+      "getSwapFee"
+    ],
+    "severity": "medium",
+    "description": "Governance can configure `DynamicSwapFeeModule` with fees up to 50%, but `CLFactory.getSwapFee` discards any value above 100_000 ppm (10%) and falls back to the tick-spacing default (often 500 ppm = 0.05%) without reverting or logging. Operators see the module reporting 20%, yet users continue paying the tiny default fee. The silent fallback misleads governance into believing higher fees are active. Impact - Governance believes a protective high fee is set (e.g., during launch anti-MEV), but the effective fee drops back to the default (e.g., 0.05%). - Traders are charged far less than intended, defeating protective or revenue objectives. - The misconfiguration has no on-chain signal, so the mistake can persist unnoticed. Root Cause - getSwapFee checks fee <= 100_000 ; larger values are ignored and the function returns tickSpacingToFee . - The module itself allows feeCap up to 500_000 (50%), so governance can set a value the factory immediately discards in favor of the default.",
+    "root_cause": "Governance can configure `DynamicSwapFeeModule` with fees up to 50%, but `CLFactory.getSwapFee` discards any value above 100_000 ppm (10%) and falls back to the tick-spacing default (often 500 ppm = 0.05%) without reverting or logging. Operators see the module reporting 20%, yet users continue paying the tiny default fee. The silent fallback misleads governance into believing higher fees are active. Impact - Governance believes a protective high fee is set (e.g., during launch anti-MEV), but the effective fee drops back to the default (e.g., 0.05%). - Traders are charged far less than intended, defeating protective or revenue objectives. - The misconfiguration has no on-chain signal, so the mistake can persist unnoticed. Root Cause - getSwapFee checks fee <= 100_000 ; larger values are ignored and the function returns tickSpacingToFee . - The module itself allows feeCap up to 500_000 (50%), so governance can set a value the factory immediately discards in favor of the default.",
+    "attack_scenario": "cd cl forge test --match-path test/PoC_DynamicFee_ClampToDefault.t.sol -vvv The PoC lifts the module cap, sets a 20% custom fee, and shows that `DynamicSwapFeeModule.getFee` returns 200_000 while `CLFactory.getSwapFee` still returns the base 500 ppm. PoC source ( `cl/test/PoC_DynamicFee_ClampToDefault.t.sol` ): // SPDX-License-Identifier: MIT pragma solidity 0.7.6; pragma abicoder v2; import \"forge-std/Test.sol\"; import {C4PoCTestbed} from \"./C4PoCTestbed.t.sol\"; import {DynamicSwapFeeModule} from \"contracts/core/fees/DynamicSwapFeeModule.sol\"; contract PoC_DynamicFee_ClampToDefault is C4PoCTestbed { address internal pool; function setUp() public override { super.setUp(); pool = poolFactory.createPool(USDC, DAI, 100, uint160(2 ** 96)); require(pool != address(0), \"pool not created\"); } function testFactoryClampsFeeAboveTenPercent() public { address manager = poolFactory.swapFeeManager(); vm.prank(manager); swapFeeModule.setFeeCap(pool, 500_000); // raise module cap to 50% vm.prank(manager); swapFeeModule.setScalingFactor(pool, 1); // ensure positive TWAP delta doesn't zero fee uint24 highFee = 200_000; // 20% vm.prank(manager); swapFeeModule.setCustomFee(pool, highFee); uint24 moduleFee = swapFeeModule.getFee(pool); assertEq(uint256(moduleFee), uint256(highFee), \"module reports configured fee\"); uint24 factoryFee = poolFactory.getSwapFee(pool); assertEq(uint256(factoryFee), 500, \"factory silently clamps to tick-spacing default\"); } }",
+    "fix_description": "Either revert when the module returns > 100_000 or raise the factory ceiling to match the module\u2019s cap. Emit events or add admin tooling to surface out-of-range configurations so operators can correct them. Hybra Finance mitigated: Added setMaxFee() function to make the fee cap configurable by the owner (up to 50%). This replaces the hardcoded limit and allows governance to adjust the maximum dynamic fee when needed.",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.8,
+    "vulnerabilities": [
+      {
+        "type": "Missing Event Emission",
+        "severity": "low",
+        "vulnerable_function": "setProtocolFeeModule",
+        "location": "CLFactory.setProtocolFeeModule",
+        "explanation": "The function does not emit an event when the protocol fee module is changed.",
+        "attack_scenario": "An attacker or unauthorized user could change the protocol fee module without being detected due to the lack of event emission.",
+        "suggested_fix": "Add an event emission to the setProtocolFeeModule function."
+      },
+      {
+        "type": "Missing Event Emission",
+        "severity": "low",
+        "vulnerable_function": "setProtocolFeeManager",
+        "location": "CLFactory.setProtocolFeeManager",
+        "explanation": "The function does not emit an event when the protocol fee manager is changed.",
+        "attack_scenario": "An attacker or unauthorized user could change the protocol fee manager without being detected due to the lack of event emission.",
+        "suggested_fix": "Add an event emission to the setProtocolFeeManager function."
+      },
+      {
+        "type": "Potential Gas Limit Issue",
+        "severity": "medium",
+        "vulnerable_function": "collectAllProtocolFees",
+        "location": "CLFactory.collectAllProtocolFees",
+        "explanation": "The function could potentially hit the gas limit if the number of pools is very large.",
+        "attack_scenario": "An attacker could create a large number of pools, causing the collectAllProtocolFees function to fail due to gas limit constraints.",
+        "suggested_fix": "Consider implementing a paginated or batched approach to collecting protocol fees."
+      }
+    ],
+    "overall_explanation": "The CLFactory contract is generally well-structured, but it has a few potential issues, including missing event emissions for certain functions and a potential gas limit issue with the collectAllProtocolFees function."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "### Step 1: Understand the Protocol Intent\n\nThe CLFactory contract is designed to deploy and manage concentrated liquidity AMM (Automated Market Maker) pools. It allows for the creation of pools with different fee configurations and integrates with dynamic fee modules that can adjust trading fees based on market conditions. The contract also includes functionality for managing protocol fees, gauge managers, and tick spacing configurations.\n\n### Step 2: Map the Code Flow\n\n1. **Constructor**: Initializes the contract with a pool implementation address, sets the owner, and various fee managers. It also sets default fees and enables several tick spacings.\n2. **Pool Creation**: The `createPool` function creates new CL pools based on token pairs and tick spacing, using a deterministic cloning mechanism.\n3. **Fee Management**: The contract includes several functions for managing swap fees, unstaked fees, and protocol fees, including setting fee modules and default fees.\n4. **Tick Spacing Management**: The `enableTickSpacing` function allows the owner to enable new tick spacings with associated fees.\n5. **Protocol Fee Collection**: The contract allows the owner to collect protocol fees from all pools or specific pools.\n\n### Step 3: Compare Intent vs Implementation\n\nUpon reviewing the code, several aspects are notable:\n\n1. **Use of `ExcessivelySafeCall`**: The contract uses `ExcessivelySafeCall` for external calls to fee modules, which is a safe practice to prevent reentrancy attacks.\n2. **Fee Management**: The contract has complex fee management logic, including dynamic fee modules. The logic for fetching fees from these modules is implemented carefully with success checks.\n3. **Access Control**: Most sensitive functions are restricted to the owner or specific managers (e.g., `setOwner`, `setSwapFeeManager`, `collectAllProtocolFees`).\n4. **Pool Creation**: The `createPool` function ensures that pools are created with valid parameters (e.g., tokenA != tokenB, valid tick spacing).\n\n### Step 4: Identify Attack Vectors\n\n1. **Reentrancy**: The use of `ExcessivelySafeCall` mitigates reentrancy risks in external calls.\n2. **Unprotected Functions**: Some functions are protected by requiring the caller to be the owner or a specific manager. However, the impact of changing these roles needs consideration.\n3. **Fee Module Interactions**: The contract's reliance on external fee modules introduces risks if these modules are malicious or faulty.\n\n### Step 5: Validate Findings\n\nUpon closer inspection, one potential issue stands out:\n\n1. **Potential Issue with `collectAllProtocolFees`**: This function iterates over all pools and calls `collectProtocolFees` on each. If the number of pools is very large, this could potentially lead to a gas limit issue, causing the transaction to fail. However, this is not necessarily a security vulnerability but rather a potential operational issue.\n\n2. **Lack of Event Emission in `setProtocolFeeModule` and `setProtocolFeeManager`**: Unlike other similar functions, `setProtocolFeeModule` and `setProtocolFeeManager` do not emit events. This could make it difficult to track changes to these important parameters.\n\n### Analysis Result\n\n```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.8,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Missing Event Emission\",\n      \"severity\": \"low\",\n      \"vulnerable_function\": \"setProtocolFeeModule\",\n      \"location\": \"CLFactory.setProtocolFeeModule\",\n      \"explanation\": \"The function does not emit an event when the protocol fee module is changed.\",\n      \"attack_scenario\": \"An attacker or unauthorized user could change the protocol fee module without being detected due to the lack of event emission.\",\n      \"suggested_fix\": \"Add an event emission to the setProtocolFeeModule function.\"\n    },\n    {\n      \"type\": \"Missing Event Emission\",\n      \"severity\": \"low\",\n      \"vulnerable_function\": \"setProtocolFeeManager\",\n      \"location\": \"CLFactory.setProtocolFeeManager\",\n      \"explanation\": \"The function does not emit an event when the protocol fee manager is changed.\",\n      \"attack_scenario\": \"An attacker or unauthorized user could change the protocol fee manager without being detected due to the lack of event emission.\",\n      \"suggested_fix\": \"Add an event emission to the setProtocolFeeManager function.\"\n    },\n    {\n      \"type\": \"Potential Gas Limit Issue\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"collectAllProtocolFees\",\n      \"location\": \"CLFactory.collectAllProtocolFees\",\n      \"explanation\": \"The function could potentially hit the gas limit if the number of pools is very large.\",\n      \"attack_scenario\": \"An attacker could create a large number of pools, causing the collectAllProtocolFees function to fail due to gas limit constraints.\",\n      \"suggested_fix\": \"Consider implementing a paginated or batched approach to collecting protocol fees.\"\n    }\n  ],\n  \"overall_explanation\": \"The CLFactory contract is generally well-structured, but it has a few potential issues, including missing event emissions for certain functions and a potential gas limit issue with the collectAllProtocolFees function.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": false,
+    "context_file_count": 0,
+    "has_protocol_doc": true
+  },
+  "api_metrics": {
+    "input_tokens": 3131,
+    "output_tokens": 1076,
+    "latency_ms": 5344.315052032471
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "sample_id": "gs_090",
+  "dataset": "gs",
+  "prompt_type": "direct",
+  "model": "gpt-5.2",
+  "timestamp": "2026-05-25T08:03:35.193530+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "access_control",
+    "vulnerable_functions": [
+      "setEntropyProvider"
+    ],
+    "severity": "medium",
+    "description": "Switching Pyth entropy providers mid-draw allows attacker to select a malicious provider returning predetermined numbers.",
+    "root_cause": "Switching Pyth entropy providers mid-draw allows attacker to select a malicious provider returning predetermined numbers.",
+    "attack_scenario": "",
+    "fix_description": "Freeze entropy provider changes while a draw is active.",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.72,
+    "vulnerabilities": [
+      {
+        "type": "Bit-packing overflow causing bonusball to be unrepresentable (shift >= 256 => zero), inflating win tiers/payouts",
+        "severity": "high",
+        "vulnerable_function": "_setNewDrawingState (creates bonusballMax without enforcing packing capacity); downstream: _calculateTicketTierId / ticket packing logic",
+        "location": "Jackpot._setNewDrawingState (and downstream Jackpot._calculateTicketTierId)",
+        "explanation": "The system encodes tickets/winning numbers as a uint256 bit-vector (see MAX_BIT_VECTOR_SIZE=255 usage in _calculateLpPoolCap and comments about packing). However, _setNewDrawingState computes `newBonusball` and stores it as `bonusballMax` without capping it to the remaining bit capacity `(255 - normalBallMax)`. If a drawing is created where `ballMax + bonusballMax >= 256`, any attempt to set/read the bonusball bit at position `(ballMax + bonusball)` will involve shifts by >=256 bits, which on EVM bit-shifts results in zero (not a revert). This makes the bonusball effectively unencoded/always zero, so bonusball matching becomes incorrect (often always true), leading to systematically higher tiers than intended and incorrect payout accounting, draining LP funds over time.",
+        "attack_scenario": "1) Wait until (or help cause) a drawing where `drawingState[currentDrawingId].ballMax + drawingState[currentDrawingId].bonusballMax >= 256` (e.g., large prize pool => computed bonusballMax grows; no cap is applied).\n2) Buy many tickets in that drawing (bonusball value becomes effectively unrepresented in the packed ticket if its bit position is >=256).\n3) When the drawing settles, the winning ticket\u2019s bonusball bit is also unrepresentable, so both ticket and winning \u201cbonusball\u201d decode to the same zero value.\n4) Call `claimWinnings()`; `_calculateTicketTierId` will treat `ticketBonusball == winningBonusball` as true, upgrading tiers (bonusballMatch) compared to the intended game, increasing payouts and extracting excess USDC from the pool relative to fair odds.",
+        "suggested_fix": "Enforce packing constraints whenever setting/using ball/bonusball ranges:\n- In `_setNewDrawingState`, cap: `uint8 maxBonus = uint8(MAX_BIT_VECTOR_SIZE - normalBallMax); newBonusball = uint8(Math.min(uint256(newBonusball), uint256(maxBonus)));`.\n- Add a hard invariant check (revert) before initializing the drawing: `require(uint256(normalBallMax) + uint256(newBonusball) < 256, \"Invalid ranges\");`.\n- Also validate in admin setters (`setNormalBallMax`) and in `runJackpot` request construction that `ballMax + bonusballMax < 256` to prevent entering an unsafe drawing state."
+      }
+    ],
+    "overall_explanation": "The main concrete risk is in Jackpot\u2019s drawing-parameter generation: bonusballMax is not constrained to the remaining uint256 bit-vector capacity implied by the protocol\u2019s packing scheme (MAX_BIT_VECTOR_SIZE=255). If a drawing is created with ballMax+bonusballMax >= 256, bonusball encoding/decoding collapses (shifts >=256 yield zero), making bonusball matching incorrect and enabling systematically inflated win tiers/payout expectations, which can drain LP funds over time. Other reviewed paths (entropy callback flow, ETH refunds, ticket purchase/claim flow) did not show a clear non-admin exploit with direct fund loss."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.72,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Bit-packing overflow causing bonusball to be unrepresentable (shift >= 256 => zero), inflating win tiers/payouts\",\n      \"severity\": \"high\",\n      \"vulnerable_function\": \"_setNewDrawingState (creates bonusballMax without enforcing packing capacity); downstream: _calculateTicketTierId / ticket packing logic\",\n      \"location\": \"Jackpot._setNewDrawingState (and downstream Jackpot._calculateTicketTierId)\",\n      \"explanation\": \"The system encodes tickets/winning numbers as a uint256 bit-vector (see MAX_BIT_VECTOR_SIZE=255 usage in _calculateLpPoolCap and comments about packing). However, _setNewDrawingState computes `newBonusball` and stores it as `bonusballMax` without capping it to the remaining bit capacity `(255 - normalBallMax)`. If a drawing is created where `ballMax + bonusballMax >= 256`, any attempt to set/read the bonusball bit at position `(ballMax + bonusball)` will involve shifts by >=256 bits, which on EVM bit-shifts results in zero (not a revert). This makes the bonusball effectively unencoded/always zero, so bonusball matching becomes incorrect (often always true), leading to systematically higher tiers than intended and incorrect payout accounting, draining LP funds over time.\",\n      \"attack_scenario\": \"1) Wait until (or help cause) a drawing where `drawingState[currentDrawingId].ballMax + drawingState[currentDrawingId].bonusballMax >= 256` (e.g., large prize pool => computed bonusballMax grows; no cap is applied).\\n2) Buy many tickets in that drawing (bonusball value becomes effectively unrepresented in the packed ticket if its bit position is >=256).\\n3) When the drawing settles, the winning ticket\u2019s bonusball bit is also unrepresentable, so both ticket and winning \u201cbonusball\u201d decode to the same zero value.\\n4) Call `claimWinnings()`; `_calculateTicketTierId` will treat `ticketBonusball == winningBonusball` as true, upgrading tiers (bonusballMatch) compared to the intended game, increasing payouts and extracting excess USDC from the pool relative to fair odds.\",\n      \"suggested_fix\": \"Enforce packing constraints whenever setting/using ball/bonusball ranges:\\n- In `_setNewDrawingState`, cap: `uint8 maxBonus = uint8(MAX_BIT_VECTOR_SIZE - normalBallMax); newBonusball = uint8(Math.min(uint256(newBonusball), uint256(maxBonus)));`.\\n- Add a hard invariant check (revert) before initializing the drawing: `require(uint256(normalBallMax) + uint256(newBonusball) < 256, \\\"Invalid ranges\\\");`.\\n- Also validate in admin setters (`setNormalBallMax`) and in `runJackpot` request construction that `ballMax + bonusballMax < 256` to prevent entering an unsafe drawing state.\"\n    }\n  ],\n  \"overall_explanation\": \"The main concrete risk is in Jackpot\u2019s drawing-parameter generation: bonusballMax is not constrained to the remaining uint256 bit-vector capacity implied by the protocol\u2019s packing scheme (MAX_BIT_VECTOR_SIZE=255). If a drawing is created with ballMax+bonusballMax >= 256, bonusball encoding/decoding collapses (shifts >=256 yield zero), making bonusball matching incorrect and enabling systematically inflated win tiers/payout expectations, which can drain LP funds over time. Other reviewed paths (entropy callback flow, ETH refunds, ticket purchase/claim flow) did not show a clear non-admin exploit with direct fund loss.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": true,
+    "context_file_count": 1,
+    "has_protocol_doc": false
+  },
+  "api_metrics": {
+    "input_tokens": 20770,
+    "output_tokens": 7317,
+    "latency_ms": 127125.77104568481
+  }
+}

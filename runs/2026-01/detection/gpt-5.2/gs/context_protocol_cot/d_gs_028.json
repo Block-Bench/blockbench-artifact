@@ -1,0 +1,51 @@
+{
+  "sample_id": "gs_028",
+  "dataset": "gs",
+  "prompt_type": "context_protocol_cot",
+  "model": "gpt-5.2",
+  "timestamp": "2026-01-05T14:11:02.374581+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "access_control",
+    "vulnerable_functions": [
+      "recover"
+    ],
+    "severity": "high",
+    "description": "When a wallet is behind a checkpointer and a chained signature is used with bit 6 (checkpointer usage flag) set to zero, BaseSig.recover skips the checkpointer validation block (BaseSig.sol:88-106). This leaves _checkpointer and snapshot unset (zero-valued). In recoverChained, the checkpointer is ignored, and the signature validation passes even if the checkpointer should be enforced. The final validation succeeds because snapshot.imageHash == bytes32(0) as the checkpointer is ignored.",
+    "root_cause": "When a wallet is behind a checkpointer and a chained signature is used with bit 6 (checkpointer usage flag) set to zero, BaseSig.recover skips the checkpointer validation block (BaseSig.sol:88-106). This leaves _checkpointer and snapshot unset (zero-valued). In recoverChained, the checkpointer is ignored, and the signature validation passes even if the checkpointer should be enforced. The final validation succeeds because snapshot.imageHash == bytes32(0) as the checkpointer is ignored.",
+    "attack_scenario": "An evicted signer can sign a payload valid under stale wallet configuration and bypass checkpointer validation. PoC: Add test case to BaseSigTest and run forge test --match-test test_PoC_checkpointer_bypass. The test constructs a chained signature with checkpointer disabled, mocks the checkpointer response, and asserts successful recovery with correct image hash.",
+    "fix_description": "Do not permit checkpointer to be disabled (bit 6 unset) if chained signature is used. Revert in this case with custom error. Example fix in BaseSig.sol:\nif (signatureFlag & 0x40 == 0) {\n    revert MissingCheckpointer();\n}",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.62,
+    "vulnerabilities": [
+      {
+        "type": "Authorization bypass (checkpointer not enforced when provided externally)",
+        "severity": "high",
+        "vulnerable_function": "recover",
+        "location": "BaseSig.recover",
+        "explanation": "The library only invokes the checkpointer middleware (ICheckpointer(_checkpointer).snapshotFor(...)) when the signature flag has bit 0x40 set AND the _checkpointer argument is address(0). If the caller supplies a non-zero _checkpointer (e.g., derived from wallet configuration or from a chained signature context), BaseSig never reads checkpointerData from the signature and never calls snapshotFor, meaning any additional authorization constraints enforced by the checkpointer are silently skipped. This contradicts the stated intent that \u201cCheckpointers can enforce additional validation rules on wallet operations.\u201d As a result, signature validation may succeed based solely on signer weight/threshold even when a checkpointer was meant to gate the operation.",
+        "attack_scenario": "1) A wallet is configured to require a checkpointer (e.g., daily spend limit / timelock) and the integrating wallet code passes that configured checkpointer address as the _checkpointer argument into BaseSig.recover.\n2) An attacker obtains a normal valid signer signature meeting threshold for an operation that should be rejected by the checkpointer.\n3) The attacker submits the operation with a signature that omits checkpointerData.\n4) BaseSig.recover computes imageHash including the provided _checkpointer, but never calls snapshotFor, so the checkpointer\u2019s policy is not evaluated; the operation is accepted and executed.",
+        "suggested_fix": "If _checkpointer != address(0) and !_ignoreCheckpointer, require/check for checkpointer data in the signature and always call snapshotFor on the provided _checkpointer. Concretely: move the snapshotFor call out of the \u201c_checkpointer == address(0)\u201d branch, and gate it on \u201chasCheckpointerFlag\u201d + \u201c!_ignoreCheckpointer\u201d, using (_checkpointer == 0 ? read from signature : use provided) while still reading checkpointerData and executing snapshotFor."
+      }
+    ],
+    "overall_explanation": "BaseSig\u2019s core signature parsing/weight accounting is generally consistent, but checkpointer enforcement is conditional in a way that can completely disable middleware validation when the checkpointer address is supplied externally by the caller. In such integrations, an attacker can bypass checkpointer-based restrictions and authorize operations with only threshold signatures. The UnstakeRequestsManager context contract did not present an exploitable issue under the stated constraints."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.62,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Authorization bypass (checkpointer not enforced when provided externally)\",\n      \"severity\": \"high\",\n      \"vulnerable_function\": \"recover\",\n      \"location\": \"BaseSig.recover\",\n      \"explanation\": \"The library only invokes the checkpointer middleware (ICheckpointer(_checkpointer).snapshotFor(...)) when the signature flag has bit 0x40 set AND the _checkpointer argument is address(0). If the caller supplies a non-zero _checkpointer (e.g., derived from wallet configuration or from a chained signature context), BaseSig never reads checkpointerData from the signature and never calls snapshotFor, meaning any additional authorization constraints enforced by the checkpointer are silently skipped. This contradicts the stated intent that \u201cCheckpointers can enforce additional validation rules on wallet operations.\u201d As a result, signature validation may succeed based solely on signer weight/threshold even when a checkpointer was meant to gate the operation.\",\n      \"attack_scenario\": \"1) A wallet is configured to require a checkpointer (e.g., daily spend limit / timelock) and the integrating wallet code passes that configured checkpointer address as the _checkpointer argument into BaseSig.recover.\\n2) An attacker obtains a normal valid signer signature meeting threshold for an operation that should be rejected by the checkpointer.\\n3) The attacker submits the operation with a signature that omits checkpointerData.\\n4) BaseSig.recover computes imageHash including the provided _checkpointer, but never calls snapshotFor, so the checkpointer\u2019s policy is not evaluated; the operation is accepted and executed.\",\n      \"suggested_fix\": \"If _checkpointer != address(0) and !_ignoreCheckpointer, require/check for checkpointer data in the signature and always call snapshotFor on the provided _checkpointer. Concretely: move the snapshotFor call out of the \u201c_checkpointer == address(0)\u201d branch, and gate it on \u201chasCheckpointerFlag\u201d + \u201c!_ignoreCheckpointer\u201d, using (_checkpointer == 0 ? read from signature : use provided) while still reading checkpointerData and executing snapshotFor.\"\n    }\n  ],\n  \"overall_explanation\": \"BaseSig\u2019s core signature parsing/weight accounting is generally consistent, but checkpointer enforcement is conditional in a way that can completely disable middleware validation when the checkpointer address is supplied externally by the caller. In such integrations, an attacker can bypass checkpointer-based restrictions and authorize operations with only threshold signatures. The UnstakeRequestsManager context contract did not present an exploitable issue under the stated constraints.\"\n}"
+  },
+  "context_info": {
+    "has_context_files": true,
+    "context_file_count": 1,
+    "has_protocol_doc": true
+  },
+  "api_metrics": {
+    "input_tokens": 7065,
+    "output_tokens": 5286,
+    "latency_ms": 118386.14511489868
+  }
+}

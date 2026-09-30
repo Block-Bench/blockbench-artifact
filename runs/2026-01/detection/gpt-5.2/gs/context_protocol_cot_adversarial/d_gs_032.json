@@ -1,0 +1,69 @@
+{
+  "sample_id": "gs_032",
+  "dataset": "gs",
+  "prompt_type": "context_protocol_cot_adversarial",
+  "model": "gpt-5.2",
+  "timestamp": "2026-01-05T16:25:07.953363+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "logic_error",
+    "vulnerable_functions": [
+      "recoverSapientSignature"
+    ],
+    "severity": "medium",
+    "description": "BaseAuth.recoverSapientSignature returns bytes32(uint256(1)) instead of actual signer imageHash, violating ISapient interface. Breaks Merkle leaf construction in BaseSig.recoverBranch.",
+    "root_cause": "BaseAuth.recoverSapientSignature returns bytes32(uint256(1)) instead of actual signer imageHash, violating ISapient interface. Breaks Merkle leaf construction in BaseSig.recoverBranch.",
+    "attack_scenario": "Wallet uses another wallet as sapient signer \u2192 signature validation fails due to incorrect image hash. PoC: Add test to test/modules/BaseSig.t.sol: test_BaseAuth_recoverSapientSignature_ReturnsConstant. Deploys MinimalSapient, crafts signature, asserts constant return.",
+    "fix_description": "Return actual image hash from recoverSapientSignature. Extend signatureValidation to return imageHash or call BaseSig.recover.",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.66,
+    "vulnerabilities": [
+      {
+        "type": "ERC-1271 non-compliance / unexpected revert on invalid signature",
+        "severity": "medium",
+        "vulnerable_function": "isValidSignature(bytes32,bytes)",
+        "location": "BaseAuth.isValidSignature -> BaseAuth.signatureValidation",
+        "explanation": "ERC-1271 callers generally expect `isValidSignature` to be a pure/view validity check that returns the magic value for valid signatures and `0x00000000` for invalid signatures. This implementation can revert for multiple invalid-signature cases (e.g., expired static signature, wrong caller for static signature, insufficient weight). Reverts can break integrations that treat a revert as a hard failure, potentially causing denial-of-service for protocols that verify signatures on-chain as part of execution paths (e.g., token transfers gated by signature checks, marketplaces, account abstraction helpers, etc.).",
+        "attack_scenario": "1) A third-party protocol calls this wallet's `isValidSignature(hash, sig)` as part of its own execution flow.\n2) An attacker supplies a signature that triggers the static-signature path (0x80 flag) but is expired, or a signature that fails the weight/threshold check.\n3) Instead of returning `0x00000000`, `BaseAuth` reverts, causing the caller protocol's operation to revert.\n4) The attacker can repeatedly trigger this to grief/DoS flows that depend on a non-reverting ERC-1271 check.",
+        "suggested_fix": "Make `isValidSignature` never revert for invalid signatures. Wrap `signatureValidation` in a `try/catch`-like pattern by refactoring validation to return `(bool, bytes32)` without reverting, or add a non-reverting variant used by `isValidSignature`. Convert revert-based invalid paths (expired, wrong caller, bad weight) into `return bytes4(0)` behavior for ERC-1271."
+      },
+      {
+        "type": "Out-of-bounds read / revert on empty signature (DoS vector)",
+        "severity": "low",
+        "vulnerable_function": "signatureValidation(Payload.Decoded,bytes)",
+        "location": "BaseAuth.signatureValidation",
+        "explanation": "`signatureValidation` reads `_signature[0]` without checking `_signature.length > 0`. If `_signature` is empty, the call reverts due to out-of-bounds calldata access. Because `isValidSignature` directly calls `signatureValidation`, `isValidSignature` will also revert on empty signatures, compounding the ERC-1271 integration risk.",
+        "attack_scenario": "1) Any caller (including on-chain integrators) calls `isValidSignature(hash, \"\")`.\n2) The contract reverts at `_signature[0]`.\n3) If the caller protocol does not handle reverts, its transaction reverts, creating a griefing/DoS primitive.",
+        "suggested_fix": "Add an early length check: if `_signature.length == 0`, return invalid (or in the ERC-1271 path, return `bytes4(0)`), rather than reading `_signature[0]`."
+      },
+      {
+        "type": "Static signature can be unrestricted (bearer) enabling front-running/replay by arbitrary callers",
+        "severity": "medium",
+        "vulnerable_function": "signatureValidation(Payload.Decoded,bytes)",
+        "location": "BaseAuth.signatureValidation (static signature branch)",
+        "explanation": "When a static signature is set with `_address == address(0)`, the contract explicitly allows *any* `msg.sender` to use it until expiry. If static signatures are used to authorize sensitive operations that are submitted by relayers (common in smart wallet flows), an attacker observing the mempool can copy the operation and submit it first (or submit it via a different caller), potentially capturing any `msg.sender`-dependent rewards/fees or otherwise altering the intended execution context. Whether this is exploitable depends on how `opHash` is constructed in `Payload.hash()` and how downstream execution uses `msg.sender` or caller-bound semantics.",
+        "attack_scenario": "1) Wallet sets a static signature for some `opHash` with `_address = address(0)` and future expiry.\n2) An intended relayer broadcasts a transaction that relies on this static signature path.\n3) An attacker copies the calldata/signature and front-runs the relayer\u2019s transaction (or replays it in another context) because there is no caller binding.\n4) The attacker becomes `msg.sender` for the execution path, potentially capturing relayer reimbursements, affiliate fees, or any logic keyed off `msg.sender` in the wallet\u2019s execution module(s).",
+        "suggested_fix": "If caller-binding is required for security/economics, enforce `_address != address(0)` for static signatures, or include the expected caller in the signed/precomputed `opHash` (so unrestricted static signatures cannot be replayed by others). At minimum, document prominently that `_address=0` creates a bearer authorization and should not be used when caller-binding matters."
+      }
+    ],
+    "overall_explanation": "The core intent (supporting nested/sapient signers and an optional static-signature fast path) is clear, and the high-level flow matches that intent: either validate via a pre-authorized static mapping keyed by `opHash`, or recover an `imageHash` and verify weight/threshold. However, the current implementation makes the ERC-1271 surface brittle: invalid signatures can revert (including an unconditional out-of-bounds revert for empty signatures), which is a common real-world integration/DoS risk. Additionally, the static-signature design intentionally allows bearer-style authorization when `_address == address(0)`, which can enable front-running/replay unless downstream semantics are carefully caller-agnostic or the payload hash binds caller context. Given these issues, I cannot sign off as \"completely safe\" based solely on this code."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.66,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"ERC-1271 non-compliance / unexpected revert on invalid signature\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"isValidSignature(bytes32,bytes)\",\n      \"location\": \"BaseAuth.isValidSignature -> BaseAuth.signatureValidation\",\n      \"explanation\": \"ERC-1271 callers generally expect `isValidSignature` to be a pure/view validity check that returns the magic value for valid signatures and `0x00000000` for invalid signatures. This implementation can revert for multiple invalid-signature cases (e.g., expired static signature, wrong caller for static signature, insufficient weight). Reverts can break integrations that treat a revert as a hard failure, potentially causing denial-of-service for protocols that verify signatures on-chain as part of execution paths (e.g., token transfers gated by signature checks, marketplaces, account abstraction helpers, etc.).\",\n      \"attack_scenario\": \"1) A third-party protocol calls this wallet's `isValidSignature(hash, sig)` as part of its own execution flow.\\n2) An attacker supplies a signature that triggers the static-signature path (0x80 flag) but is expired, or a signature that fails the weight/threshold check.\\n3) Instead of returning `0x00000000`, `BaseAuth` reverts, causing the caller protocol's operation to revert.\\n4) The attacker can repeatedly trigger this to grief/DoS flows that depend on a non-reverting ERC-1271 check.\",\n      \"suggested_fix\": \"Make `isValidSignature` never revert for invalid signatures. Wrap `signatureValidation` in a `try/catch`-like pattern by refactoring validation to return `(bool, bytes32)` without reverting, or add a non-reverting variant used by `isValidSignature`. Convert revert-based invalid paths (expired, wrong caller, bad weight) into `return bytes4(0)` behavior for ERC-1271.\"\n    },\n    {\n      \"type\": \"Out-of-bounds read / revert on empty signature (DoS vector)\",\n      \"severity\": \"low\",\n      \"vulnerable_function\": \"signatureValidation(Payload.Decoded,bytes)\",\n      \"location\": \"BaseAuth.signatureValidation\",\n      \"explanation\": \"`signatureValidation` reads `_signature[0]` without checking `_signature.length > 0`. If `_signature` is empty, the call reverts due to out-of-bounds calldata access. Because `isValidSignature` directly calls `signatureValidation`, `isValidSignature` will also revert on empty signatures, compounding the ERC-1271 integration risk.\",\n      \"attack_scenario\": \"1) Any caller (including on-chain integrators) calls `isValidSignature(hash, \\\"\\\")`.\\n2) The contract reverts at `_signature[0]`.\\n3) If the caller protocol does not handle reverts, its transaction reverts, creating a griefing/DoS primitive.\",\n      \"suggested_fix\": \"Add an early length check: if `_signature.length == 0`, return invalid (or in the ERC-1271 path, return `bytes4(0)`), rather than reading `_signature[0]`.\"\n    },\n    {\n      \"type\": \"Static signature can be unrestricted (bearer) enabling front-running/replay by arbitrary callers\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"signatureValidation(Payload.Decoded,bytes)\",\n      \"location\": \"BaseAuth.signatureValidation (static signature branch)\",\n      \"explanation\": \"When a static signature is set with `_address == address(0)`, the contract explicitly allows *any* `msg.sender` to use it until expiry. If static signatures are used to authorize sensitive operations that are submitted by relayers (common in smart wallet flows), an attacker observing the mempool can copy the operation and submit it first (or submit it via a different caller), potentially capturing any `msg.sender`-dependent rewards/fees or otherwise altering the intended execution context. Whether this is exploitable depends on how `opHash` is constructed in `Payload.hash()` and how downstream execution uses `msg.sender` or caller-bound semantics.\",\n      \"attack_scenario\": \"1) Wallet sets a static signature for some `opHash` with `_address = address(0)` and future expiry.\\n2) An intended relayer broadcasts a transaction that relies on this static signature path.\\n3) An attacker copies the calldata/signature and front-runs the relayer\u2019s transaction (or replays it in another context) because there is no caller binding.\\n4) The attacker becomes `msg.sender` for the execution path, potentially capturing relayer reimbursements, affiliate fees, or any logic keyed off `msg.sender` in the wallet\u2019s execution module(s).\",\n      \"suggested_fix\": \"If caller-binding is required for security/economics, enforce `_address != address(0)` for static signatures, or include the expected caller in the signed/precomputed `opHash` (so unrestricted static signatures cannot be replayed by others). At minimum, document prominently that `_address=0` creates a bearer authorization and should not be used when caller-binding matters.\"\n    }\n  ],\n  \"overall_explanation\": \"The core intent (supporting nested/sapient signers and an optional static-signature fast path) is clear, and the high-level flow matches that intent: either validate via a pre-authorized static mapping keyed by `opHash`, or recover an `imageHash` and verify weight/threshold. However, the current implementation makes the ERC-1271 surface brittle: invalid signatures can revert (including an unconditional out-of-bounds revert for empty signatures), which is a common real-world integration/DoS risk. Additionally, the static-signature design intentionally allows bearer-style authorization when `_address == address(0)`, which can enable front-running/replay unless downstream semantics are carefully caller-agnostic or the payload hash binds caller context. Given these issues, I cannot sign off as \\\"completely safe\\\" based solely on this code.\"\n}"
+  },
+  "context_info": {
+    "has_context_files": true,
+    "context_file_count": 1,
+    "has_protocol_doc": true
+  },
+  "api_metrics": {
+    "input_tokens": 3687,
+    "output_tokens": 2552,
+    "latency_ms": 52885.12301445007
+  }
+}

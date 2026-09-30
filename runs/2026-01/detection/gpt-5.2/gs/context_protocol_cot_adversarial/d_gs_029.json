@@ -1,0 +1,60 @@
+{
+  "sample_id": "gs_029",
+  "dataset": "gs",
+  "prompt_type": "context_protocol_cot_adversarial",
+  "model": "gpt-5.2",
+  "timestamp": "2026-01-05T16:17:32.556759+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "signature_replay",
+    "vulnerable_functions": [
+      "execute"
+    ],
+    "severity": "high",
+    "description": "When a session call with BEHAVIOR_REVERT_ON_ERROR fails, the transaction reverts but nonce is not consumed. The signature remains valid and can be replayed for partial calls. Session signatures are validated per-call using individual call hashes, enabling partial replay. Frontrunners can execute subsets of calls to grief or cause financial loss.",
+    "root_cause": "When a session call with BEHAVIOR_REVERT_ON_ERROR fails, the transaction reverts but nonce is not consumed. The signature remains valid and can be replayed for partial calls. Session signatures are validated per-call using individual call hashes, enabling partial replay. Frontrunners can execute subsets of calls to grief or cause financial loss.",
+    "attack_scenario": "Original payload: Calls [A, B, C] with signatures [SigA, SigB, SigC]. Execution: [A succeed, B succeed, C revert]. Result: Revert, nonce unused. Attack: Replay [A, B] with [SigA, SigB]. PoC: File POC.t.sol with test testSubmissionValidity. It builds a 2-call payload, expects revert on second call, then replays partial payload successfully.",
+    "fix_description": "Bind session call signatures to the complete payload hash to prevent partial signature replay.",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.66,
+    "vulnerabilities": [
+      {
+        "type": "Incorrect error-handling / invalid enum value leads to silent failure",
+        "severity": "medium",
+        "vulnerable_function": "_execute",
+        "location": "Calls._execute",
+        "explanation": "If a low-level call fails and `call.behaviorOnError` is not exactly one of the handled constants (`BEHAVIOR_IGNORE_ERROR`, `BEHAVIOR_REVERT_ON_ERROR`, `BEHAVIOR_ABORT_ON_ERROR`), the code falls through and emits `CallSucceeded` even though `success == false`. This breaks the documented execution semantics (revert/continue/abort) and can also break `onlyFallback` logic since `errorFlag` will remain false. Even if `Payload` is intended to constrain this value, `_execute` defensively relies on it being well-formed without enforcing it.",
+        "attack_scenario": "1) Attacker obtains the ability to execute a signed batch under a policy that does not strictly validate/normalize `behaviorOnError` values (e.g., a session key scheme that checks signature but does not enforce field ranges).\n2) They craft a payload where a critical call is expected to fail (e.g., calling a target that reverts), and set `behaviorOnError` to an out-of-range value (e.g., 3).\n3) The call fails, but `_execute` emits `CallSucceeded` and continues as if it succeeded; `onlyFallback` calls that should have run after a failure are skipped.\n4) Off-chain systems and/or subsequent calls in the batch may proceed under the false assumption that the prior call succeeded, violating intended wallet execution guarantees.",
+        "suggested_fix": "Validate `behaviorOnError` explicitly and treat unknown values as `REVERT_ON_ERROR` (or revert with a dedicated error). Example: add an `else { revert InvalidBehaviorOnError(...); }` inside the `if (!success)` block."
+      },
+      {
+        "type": "Reentrancy guard bypass via unguarded privileged self-call path",
+        "severity": "medium",
+        "vulnerable_function": "selfExecute",
+        "location": "Calls.selfExecute",
+        "explanation": "`execute()` is protected by `nonReentrant`, but `selfExecute()` is not. Because `onlySelf` is satisfied whenever the wallet calls itself (including from within `_execute` via an operation with `to = address(this)` or from code reached through `delegatecall`), nested execution can occur while the `ReentrancyGuard` is \"entered\". This undermines the intended invariant that call execution is single-threaded/non-reentrant and creates a privileged execution path that bypasses the guard and any assumptions other modules may make about `nonReentrant` covering all execution entrypoints.",
+        "attack_scenario": "1) A signed batch includes (or reaches via `delegatecall`) a call from the wallet to itself invoking `selfExecute(payload2)`.\n2) During `execute()`, the contract enters `_execute`, then performs the self-call, entering `selfExecute()` while still inside the outer `execute()` context.\n3) `selfExecute()` runs another `_execute` loop without `nonReentrant` protection.\n4) If the wallet/derived modules have any state that assumes `nonReentrant` prevents nested execution (e.g., temporary allowances, transient accounting, or other execution-phase invariants), the nested batch can violate those assumptions and enable reentrancy-style exploitation or unexpected behavior.\n\nNote: this is exploitable whenever an attacker can cause the wallet to perform a self-call to `selfExecute` (directly in the batch or via delegated code).",
+        "suggested_fix": "Apply `nonReentrant` to `selfExecute()` as well, or refactor so that the reentrancy guard protects the shared internal execution routine (e.g., make `_execute` reachable only through a single guarded external entrypoint). If nested self-execution is intentionally supported, document it explicitly and ensure all modules are written to be safe under nested execution."
+      }
+    ],
+    "overall_explanation": "The implementation generally matches the stated intent (batched calls, optional fallback calls after failures, and signature-gated execution with nonces). However, there are two concrete correctness/security issues in this snippet: (1) failed calls can be reported as succeeded if `behaviorOnError` is out of range, breaking execution semantics and `onlyFallback` behavior; and (2) `selfExecute()` is a privileged execution path that is not covered by the `nonReentrant` guard, enabling nested execution while the contract is already executing a batch. Even if surrounding modules usually constrain inputs, these are footguns at the module boundary and should be fixed defensively before mainnet deployment."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.66,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Incorrect error-handling / invalid enum value leads to silent failure\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"_execute\",\n      \"location\": \"Calls._execute\",\n      \"explanation\": \"If a low-level call fails and `call.behaviorOnError` is not exactly one of the handled constants (`BEHAVIOR_IGNORE_ERROR`, `BEHAVIOR_REVERT_ON_ERROR`, `BEHAVIOR_ABORT_ON_ERROR`), the code falls through and emits `CallSucceeded` even though `success == false`. This breaks the documented execution semantics (revert/continue/abort) and can also break `onlyFallback` logic since `errorFlag` will remain false. Even if `Payload` is intended to constrain this value, `_execute` defensively relies on it being well-formed without enforcing it.\",\n      \"attack_scenario\": \"1) Attacker obtains the ability to execute a signed batch under a policy that does not strictly validate/normalize `behaviorOnError` values (e.g., a session key scheme that checks signature but does not enforce field ranges).\\n2) They craft a payload where a critical call is expected to fail (e.g., calling a target that reverts), and set `behaviorOnError` to an out-of-range value (e.g., 3).\\n3) The call fails, but `_execute` emits `CallSucceeded` and continues as if it succeeded; `onlyFallback` calls that should have run after a failure are skipped.\\n4) Off-chain systems and/or subsequent calls in the batch may proceed under the false assumption that the prior call succeeded, violating intended wallet execution guarantees.\",\n      \"suggested_fix\": \"Validate `behaviorOnError` explicitly and treat unknown values as `REVERT_ON_ERROR` (or revert with a dedicated error). Example: add an `else { revert InvalidBehaviorOnError(...); }` inside the `if (!success)` block.\"\n    },\n    {\n      \"type\": \"Reentrancy guard bypass via unguarded privileged self-call path\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"selfExecute\",\n      \"location\": \"Calls.selfExecute\",\n      \"explanation\": \"`execute()` is protected by `nonReentrant`, but `selfExecute()` is not. Because `onlySelf` is satisfied whenever the wallet calls itself (including from within `_execute` via an operation with `to = address(this)` or from code reached through `delegatecall`), nested execution can occur while the `ReentrancyGuard` is \\\"entered\\\". This undermines the intended invariant that call execution is single-threaded/non-reentrant and creates a privileged execution path that bypasses the guard and any assumptions other modules may make about `nonReentrant` covering all execution entrypoints.\",\n      \"attack_scenario\": \"1) A signed batch includes (or reaches via `delegatecall`) a call from the wallet to itself invoking `selfExecute(payload2)`.\\n2) During `execute()`, the contract enters `_execute`, then performs the self-call, entering `selfExecute()` while still inside the outer `execute()` context.\\n3) `selfExecute()` runs another `_execute` loop without `nonReentrant` protection.\\n4) If the wallet/derived modules have any state that assumes `nonReentrant` prevents nested execution (e.g., temporary allowances, transient accounting, or other execution-phase invariants), the nested batch can violate those assumptions and enable reentrancy-style exploitation or unexpected behavior.\\n\\nNote: this is exploitable whenever an attacker can cause the wallet to perform a self-call to `selfExecute` (directly in the batch or via delegated code).\",\n      \"suggested_fix\": \"Apply `nonReentrant` to `selfExecute()` as well, or refactor so that the reentrancy guard protects the shared internal execution routine (e.g., make `_execute` reachable only through a single guarded external entrypoint). If nested self-execution is intentionally supported, document it explicitly and ensure all modules are written to be safe under nested execution.\"\n    }\n  ],\n  \"overall_explanation\": \"The implementation generally matches the stated intent (batched calls, optional fallback calls after failures, and signature-gated execution with nonces). However, there are two concrete correctness/security issues in this snippet: (1) failed calls can be reported as succeeded if `behaviorOnError` is out of range, breaking execution semantics and `onlyFallback` behavior; and (2) `selfExecute()` is a privileged execution path that is not covered by the `nonReentrant` guard, enabling nested execution while the contract is already executing a batch. Even if surrounding modules usually constrain inputs, these are footguns at the module boundary and should be fixed defensively before mainnet deployment.\"\n}"
+  },
+  "context_info": {
+    "has_context_files": false,
+    "context_file_count": 0,
+    "has_protocol_doc": true
+  },
+  "api_metrics": {
+    "input_tokens": 1755,
+    "output_tokens": 5256,
+    "latency_ms": 101546.90289497375
+  }
+}

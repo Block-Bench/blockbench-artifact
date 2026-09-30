@@ -1,0 +1,69 @@
+{
+  "sample_id": "gs_010",
+  "dataset": "gs",
+  "prompt_type": "context_protocol_cot_naturalistic",
+  "model": "gpt-5.2",
+  "timestamp": "2026-01-05T15:43:51.178014+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "flash_loan",
+    "vulnerable_functions": [
+      "isGranted"
+    ],
+    "severity": "high",
+    "description": "The MinVotingPowerCondition contract allows any users who hold at least plugin.minProposerVotingPower() amount of tokens (locked in the LockManager or in their token balance) to create a proposal and execute LockToVote.createProposal. This logic can be easily bypassed if the token allows flashloan or flashmint. Given that isGranted checks the user's token balance (line 45: token.balanceOf(_who) + lockManager.getLockedBalance(_who)), the user does not even need to lock the flashloaned amount into the LockManager to be able to create and spam proposals.",
+    "root_cause": "The MinVotingPowerCondition contract allows any users who hold at least plugin.minProposerVotingPower() amount of tokens (locked in the LockManager or in their token balance) to create a proposal and execute LockToVote.createProposal. This logic can be easily bypassed if the token allows flashloan or flashmint. Given that isGranted checks the user's token balance (line 45: token.balanceOf(_who) + lockManager.getLockedBalance(_who)), the user does not even need to lock the flashloaned amount into the LockManager to be able to create and spam proposals.",
+    "attack_scenario": "1. Flashloan the token.\n2. Create the proposal (isGranted passes because token.balanceOf includes flashloaned amount).\n3. Lock + vote the proposal and auto-execute it (EarlyExecution).\n4. Unlock the tokens.\n5. Repay the flashloan.\nAll in the very same transaction.",
+    "fix_description": "Avoid using the token's balance and require the user to only use the locked amount. Change line 45 from 'token.balanceOf(_who) + lockManager.getLockedBalance(_who)' to just 'lockManager.getLockedBalance(_who)'. Store the proposal's creator in the proposal struct and require that the locked amount required to create the proposal won't be unlockable until the proposal ends.",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.78,
+    "vulnerabilities": [
+      {
+        "type": "Authorization logic bypass (unlocked balance counted as voting power)",
+        "severity": "high",
+        "vulnerable_function": "isGranted",
+        "location": "isGranted(): `uint256 _currentBalance = token.balanceOf(_who) + lockManager.getLockedBalance(_who);`",
+        "explanation": "The condition is intended (per the protocol description) to enforce a *lock-to-vote* model where voting power (and the proposer threshold) comes from locked tokens. However, the implementation adds the caller's *unlocked* ERC20 balance to their locked balance. This allows meeting the proposer threshold without locking anything, which undermines the anti-spam / meaningful participation goal for proposal creation.",
+        "attack_scenario": "An attacker holds (or temporarily borrows) enough tokens to satisfy `minProposerVotingPower()` but does not lock them. They can still create proposals because `token.balanceOf(_who)` alone can satisfy the threshold. If proposals are cheap to create or have downstream effects (e.g., consume DAO resources, trigger offchain processes, or create governance noise), this reintroduces spam and can DoS governance processes.",
+        "suggested_fix": "If the intended rule is \"must lock to propose\", compute proposer eligibility using only locked voting power (e.g., `lockManager.getLockedBalance(_who)` or a dedicated `getVotingPower(_who)` method from the plugin/lock manager if voting power is not strictly equal to locked tokens). If you intentionally want to allow unlocked balances, document that explicitly because it changes the threat model."
+      },
+      {
+        "type": "Flash-loanable proposer threshold (if unlocked balance is allowed)",
+        "severity": "high",
+        "vulnerable_function": "isGranted",
+        "location": "isGranted(): reliance on `token.balanceOf(_who)` at the current state without time weighting or lock requirement",
+        "explanation": "Because the check uses the current ERC20 balance, the proposer threshold becomes potentially flash-loanable: an attacker can borrow tokens, pass the check, create a proposal, and return the tokens\u2014all in one transaction\u2014without any lasting economic commitment.",
+        "attack_scenario": "Attacker uses a flash loan to temporarily inflate `token.balanceOf(_who)`. During the same transaction they call the DAO/plugin function that checks this condition and creates a proposal. They repay the flash loan by the end of the transaction. Result: proposal created despite the attacker having no enduring stake locked in the system.",
+        "suggested_fix": "Require locked balance only (and ensure locking cannot be opened/closed within the same transaction if you want true economic commitment), or use a snapshot-based approach (e.g., voting power at `block.number - 1`) or a minimum lock duration before proposer eligibility."
+      },
+      {
+        "type": "Potential double-counting / mismatch with actual voting power model",
+        "severity": "medium",
+        "vulnerable_function": "isGranted",
+        "location": "isGranted(): `_currentBalance = token.balanceOf(_who) + lockManager.getLockedBalance(_who)`",
+        "explanation": "This assumes (1) locked tokens are always removed from the user's ERC20 balance and (2) voting power is equal to `unlocked + locked`. If the LockManager implementation does not transfer tokens out of the user's account (e.g., uses allowances, escrow shares, wrappers, or another accounting model), `token.balanceOf(_who)` may still include tokens that are also reflected in `getLockedBalance(_who)`, leading to double counting. Also, if voting power uses delegation, multipliers, vesting rules, or non-1:1 logic, this check may not match the plugin\u2019s real governance power accounting.",
+        "attack_scenario": "In a LockManager design where tokens remain in the user's wallet (or are represented in a way that preserves balance), a user who locks X tokens could still have `balanceOf` showing X, and `getLockedBalance` showing X, making the condition treat them as having 2X. This could allow users to meet proposer thresholds with less actual stake than intended.",
+        "suggested_fix": "Derive proposer eligibility from the same source of truth the plugin uses for voting power (e.g., a `plugin.getVotingPower(_who)` / `lockManager.getVotingPower(_who)` style function). Avoid summing two potentially overlapping quantities unless the lock mechanism guarantees mutual exclusivity."
+      }
+    ],
+    "overall_explanation": "The contract is small and straightforward, but the core risk is that it doesn\u2019t strictly enforce a lock-based proposer threshold as described in the business logic. By including `token.balanceOf(_who)` in the eligibility calculation, proposal creation can be satisfied with unlocked tokens and becomes flash-loanable, undermining spam resistance and the lock-to-vote commitment model. Additionally, summing unlocked and locked balances is only correct if the lock mechanism definitively removes tokens from the user\u2019s ERC20 balance and if voting power is truly 1:1 with that sum; otherwise, you risk double counting or mismatching the plugin\u2019s actual voting power rules."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.78,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Authorization logic bypass (unlocked balance counted as voting power)\",\n      \"severity\": \"high\",\n      \"vulnerable_function\": \"isGranted\",\n      \"location\": \"isGranted(): `uint256 _currentBalance = token.balanceOf(_who) + lockManager.getLockedBalance(_who);`\",\n      \"explanation\": \"The condition is intended (per the protocol description) to enforce a *lock-to-vote* model where voting power (and the proposer threshold) comes from locked tokens. However, the implementation adds the caller's *unlocked* ERC20 balance to their locked balance. This allows meeting the proposer threshold without locking anything, which undermines the anti-spam / meaningful participation goal for proposal creation.\",\n      \"attack_scenario\": \"An attacker holds (or temporarily borrows) enough tokens to satisfy `minProposerVotingPower()` but does not lock them. They can still create proposals because `token.balanceOf(_who)` alone can satisfy the threshold. If proposals are cheap to create or have downstream effects (e.g., consume DAO resources, trigger offchain processes, or create governance noise), this reintroduces spam and can DoS governance processes.\",\n      \"suggested_fix\": \"If the intended rule is \\\"must lock to propose\\\", compute proposer eligibility using only locked voting power (e.g., `lockManager.getLockedBalance(_who)` or a dedicated `getVotingPower(_who)` method from the plugin/lock manager if voting power is not strictly equal to locked tokens). If you intentionally want to allow unlocked balances, document that explicitly because it changes the threat model.\"\n    },\n    {\n      \"type\": \"Flash-loanable proposer threshold (if unlocked balance is allowed)\",\n      \"severity\": \"high\",\n      \"vulnerable_function\": \"isGranted\",\n      \"location\": \"isGranted(): reliance on `token.balanceOf(_who)` at the current state without time weighting or lock requirement\",\n      \"explanation\": \"Because the check uses the current ERC20 balance, the proposer threshold becomes potentially flash-loanable: an attacker can borrow tokens, pass the check, create a proposal, and return the tokens\u2014all in one transaction\u2014without any lasting economic commitment.\",\n      \"attack_scenario\": \"Attacker uses a flash loan to temporarily inflate `token.balanceOf(_who)`. During the same transaction they call the DAO/plugin function that checks this condition and creates a proposal. They repay the flash loan by the end of the transaction. Result: proposal created despite the attacker having no enduring stake locked in the system.\",\n      \"suggested_fix\": \"Require locked balance only (and ensure locking cannot be opened/closed within the same transaction if you want true economic commitment), or use a snapshot-based approach (e.g., voting power at `block.number - 1`) or a minimum lock duration before proposer eligibility.\"\n    },\n    {\n      \"type\": \"Potential double-counting / mismatch with actual voting power model\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"isGranted\",\n      \"location\": \"isGranted(): `_currentBalance = token.balanceOf(_who) + lockManager.getLockedBalance(_who)`\",\n      \"explanation\": \"This assumes (1) locked tokens are always removed from the user's ERC20 balance and (2) voting power is equal to `unlocked + locked`. If the LockManager implementation does not transfer tokens out of the user's account (e.g., uses allowances, escrow shares, wrappers, or another accounting model), `token.balanceOf(_who)` may still include tokens that are also reflected in `getLockedBalance(_who)`, leading to double counting. Also, if voting power uses delegation, multipliers, vesting rules, or non-1:1 logic, this check may not match the plugin\u2019s real governance power accounting.\",\n      \"attack_scenario\": \"In a LockManager design where tokens remain in the user's wallet (or are represented in a way that preserves balance), a user who locks X tokens could still have `balanceOf` showing X, and `getLockedBalance` showing X, making the condition treat them as having 2X. This could allow users to meet proposer thresholds with less actual stake than intended.\",\n      \"suggested_fix\": \"Derive proposer eligibility from the same source of truth the plugin uses for voting power (e.g., a `plugin.getVotingPower(_who)` / `lockManager.getVotingPower(_who)` style function). Avoid summing two potentially overlapping quantities unless the lock mechanism guarantees mutual exclusivity.\"\n    }\n  ],\n  \"overall_explanation\": \"The contract is small and straightforward, but the core risk is that it doesn\u2019t strictly enforce a lock-based proposer threshold as described in the business logic. By including `token.balanceOf(_who)` in the eligibility calculation, proposal creation can be satisfied with unlocked tokens and becomes flash-loanable, undermining spam resistance and the lock-to-vote commitment model. Additionally, summing unlocked and locked balances is only correct if the lock mechanism definitively removes tokens from the user\u2019s ERC20 balance and if voting power is truly 1:1 with that sum; otherwise, you risk double counting or mismatching the plugin\u2019s actual voting power rules.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": false,
+    "context_file_count": 0,
+    "has_protocol_doc": true
+  },
+  "api_metrics": {
+    "input_tokens": 1146,
+    "output_tokens": 1909,
+    "latency_ms": 46824.32007789612
+  }
+}

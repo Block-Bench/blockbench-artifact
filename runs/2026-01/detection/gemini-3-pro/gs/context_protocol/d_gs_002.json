@@ -1,0 +1,60 @@
+{
+  "sample_id": "gs_002",
+  "dataset": "gs",
+  "prompt_type": "context_protocol",
+  "model": "gemini-3-pro-hyper-extended",
+  "timestamp": "2026-01-05T13:46:32.401220+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "logic_error",
+    "vulnerable_functions": [
+      "getSwapFee"
+    ],
+    "severity": "medium",
+    "description": "Governance can configure `DynamicSwapFeeModule` with fees up to 50%, but `CLFactory.getSwapFee` discards any value above 100_000 ppm (10%) and falls back to the tick-spacing default (often 500 ppm = 0.05%) without reverting or logging. Operators see the module reporting 20%, yet users continue paying the tiny default fee. The silent fallback misleads governance into believing higher fees are active. Impact - Governance believes a protective high fee is set (e.g., during launch anti-MEV), but the effective fee drops back to the default (e.g., 0.05%). - Traders are charged far less than intended, defeating protective or revenue objectives. - The misconfiguration has no on-chain signal, so the mistake can persist unnoticed. Root Cause - getSwapFee checks fee <= 100_000 ; larger values are ignored and the function returns tickSpacingToFee . - The module itself allows feeCap up to 500_000 (50%), so governance can set a value the factory immediately discards in favor of the default.",
+    "root_cause": "Governance can configure `DynamicSwapFeeModule` with fees up to 50%, but `CLFactory.getSwapFee` discards any value above 100_000 ppm (10%) and falls back to the tick-spacing default (often 500 ppm = 0.05%) without reverting or logging. Operators see the module reporting 20%, yet users continue paying the tiny default fee. The silent fallback misleads governance into believing higher fees are active. Impact - Governance believes a protective high fee is set (e.g., during launch anti-MEV), but the effective fee drops back to the default (e.g., 0.05%). - Traders are charged far less than intended, defeating protective or revenue objectives. - The misconfiguration has no on-chain signal, so the mistake can persist unnoticed. Root Cause - getSwapFee checks fee <= 100_000 ; larger values are ignored and the function returns tickSpacingToFee . - The module itself allows feeCap up to 500_000 (50%), so governance can set a value the factory immediately discards in favor of the default.",
+    "attack_scenario": "cd cl forge test --match-path test/PoC_DynamicFee_ClampToDefault.t.sol -vvv The PoC lifts the module cap, sets a 20% custom fee, and shows that `DynamicSwapFeeModule.getFee` returns 200_000 while `CLFactory.getSwapFee` still returns the base 500 ppm. PoC source ( `cl/test/PoC_DynamicFee_ClampToDefault.t.sol` ): // SPDX-License-Identifier: MIT pragma solidity 0.7.6; pragma abicoder v2; import \"forge-std/Test.sol\"; import {C4PoCTestbed} from \"./C4PoCTestbed.t.sol\"; import {DynamicSwapFeeModule} from \"contracts/core/fees/DynamicSwapFeeModule.sol\"; contract PoC_DynamicFee_ClampToDefault is C4PoCTestbed { address internal pool; function setUp() public override { super.setUp(); pool = poolFactory.createPool(USDC, DAI, 100, uint160(2 ** 96)); require(pool != address(0), \"pool not created\"); } function testFactoryClampsFeeAboveTenPercent() public { address manager = poolFactory.swapFeeManager(); vm.prank(manager); swapFeeModule.setFeeCap(pool, 500_000); // raise module cap to 50% vm.prank(manager); swapFeeModule.setScalingFactor(pool, 1); // ensure positive TWAP delta doesn't zero fee uint24 highFee = 200_000; // 20% vm.prank(manager); swapFeeModule.setCustomFee(pool, highFee); uint24 moduleFee = swapFeeModule.getFee(pool); assertEq(uint256(moduleFee), uint256(highFee), \"module reports configured fee\"); uint24 factoryFee = poolFactory.getSwapFee(pool); assertEq(uint256(factoryFee), 500, \"factory silently clamps to tick-spacing default\"); } }",
+    "fix_description": "Either revert when the module returns > 100_000 or raise the factory ceiling to match the module\u2019s cap. Emit events or add admin tooling to surface out-of-range configurations so operators can correct them. Hybra Finance mitigated: Added setMaxFee() function to make the fee cap configurable by the owner (up to 50%). This replaces the hardcoded limit and allows governance to adjust the maximum dynamic fee when needed.",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.9,
+    "vulnerabilities": [
+      {
+        "type": "Race Condition / Initialization",
+        "severity": "high",
+        "vulnerable_function": "createPool",
+        "location": "CLFactory.sol",
+        "explanation": "The `gaugeManager` state variable is not initialized in the constructor and defaults to `address(0)`. The `createPool` function passes `address(gaugeManager)` to the `CLPool.initialize` function. Since `createPool` is permissionless and can be called immediately after deployment, an attacker (or an eager user) can deploy pools before the owner calls `setGaugeManager`. These pools will be initialized with `_gaugeManager` set to `address(0)`. If the `CLPool` logic relies on the gauge manager (e.g., for fee logic, rewards, or state checks), these pools will be permanently broken ('bricked'). Furthermore, since the factory tracks pools in the `getPool` mapping and prevents overwriting, the specific token pair and tick spacing combination will be permanently occupied by a non-functional pool.",
+        "attack_scenario": "1. The `CLFactory` is deployed. `gaugeManager` is `address(0)`. \n2. An attacker observes the deployment and immediately calls `createPool(TokenA, TokenB, 500, ...)`.\n3. The factory deploys a new pool and calls `initialize` passing `address(0)` as the gauge manager.\n4. The factory records the pool in `getPool[TokenA][TokenB][500]`.\n5. The owner calls `setGaugeManager` to configure the correct address.\n6. The pool created in step 3 retains `address(0)` as its gauge manager (assuming standard immutable/storage pattern in `CLPool`).\n7. Any interaction with that pool requiring the gauge manager will revert. The pool is broken, and because `getPool` is set, a new, correct pool cannot be deployed for that pair/spacing.",
+        "suggested_fix": "Initialize `gaugeManager` in the constructor or add a requirement in `createPool` that `address(gaugeManager) != address(0)`."
+      },
+      {
+        "type": "Denial of Service",
+        "severity": "medium",
+        "vulnerable_function": "collectAllProtocolFees",
+        "location": "CLFactory.sol",
+        "explanation": "The `collectAllProtocolFees` function iterates over the `allPools` array, which grows indefinitely as new pools are created. Since `createPool` is permissionless, an attacker can cheaply create a large number of pools to increase the length of `allPools`. Eventually, the gas cost to iterate the array will exceed the block gas limit, causing `collectAllProtocolFees` to revert permanently. While `collectProtocolFees(pool)` exists as a workaround, this renders the bulk collection feature unusable.",
+        "attack_scenario": "1. Attacker calls `createPool` repeatedly with different token pairs or tick spacings (or just random tokens).\n2. `allPools` array grows to thousands of entries.\n3. The owner calls `collectAllProtocolFees`.\n4. The transaction runs out of gas and reverts.",
+        "suggested_fix": "Implement a pagination mechanism for `collectAllProtocolFees` (e.g., taking `start` and `end` indices) to allow processing the array in chunks."
+      }
+    ],
+    "overall_explanation": "The contract contains a critical race condition during the initialization phase where pools can be deployed with an unconfigured `gaugeManager`, leading to permanently broken pools occupying registry slots. Additionally, the bulk fee collection function is vulnerable to a standard unbounded loop Denial of Service attack."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.9,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Race Condition / Initialization\",\n      \"severity\": \"high\",\n      \"vulnerable_function\": \"createPool\",\n      \"location\": \"CLFactory.sol\",\n      \"explanation\": \"The `gaugeManager` state variable is not initialized in the constructor and defaults to `address(0)`. The `createPool` function passes `address(gaugeManager)` to the `CLPool.initialize` function. Since `createPool` is permissionless and can be called immediately after deployment, an attacker (or an eager user) can deploy pools before the owner calls `setGaugeManager`. These pools will be initialized with `_gaugeManager` set to `address(0)`. If the `CLPool` logic relies on the gauge manager (e.g., for fee logic, rewards, or state checks), these pools will be permanently broken ('bricked'). Furthermore, since the factory tracks pools in the `getPool` mapping and prevents overwriting, the specific token pair and tick spacing combination will be permanently occupied by a non-functional pool.\",\n      \"attack_scenario\": \"1. The `CLFactory` is deployed. `gaugeManager` is `address(0)`. \\n2. An attacker observes the deployment and immediately calls `createPool(TokenA, TokenB, 500, ...)`.\\n3. The factory deploys a new pool and calls `initialize` passing `address(0)` as the gauge manager.\\n4. The factory records the pool in `getPool[TokenA][TokenB][500]`.\\n5. The owner calls `setGaugeManager` to configure the correct address.\\n6. The pool created in step 3 retains `address(0)` as its gauge manager (assuming standard immutable/storage pattern in `CLPool`).\\n7. Any interaction with that pool requiring the gauge manager will revert. The pool is broken, and because `getPool` is set, a new, correct pool cannot be deployed for that pair/spacing.\",\n      \"suggested_fix\": \"Initialize `gaugeManager` in the constructor or add a requirement in `createPool` that `address(gaugeManager) != address(0)`.\"\n    },\n    {\n      \"type\": \"Denial of Service\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"collectAllProtocolFees\",\n      \"location\": \"CLFactory.sol\",\n      \"explanation\": \"The `collectAllProtocolFees` function iterates over the `allPools` array, which grows indefinitely as new pools are created. Since `createPool` is permissionless, an attacker can cheaply create a large number of pools to increase the length of `allPools`. Eventually, the gas cost to iterate the array will exceed the block gas limit, causing `collectAllProtocolFees` to revert permanently. While `collectProtocolFees(pool)` exists as a workaround, this renders the bulk collection feature unusable.\",\n      \"attack_scenario\": \"1. Attacker calls `createPool` repeatedly with different token pairs or tick spacings (or just random tokens).\\n2. `allPools` array grows to thousands of entries.\\n3. The owner calls `collectAllProtocolFees`.\\n4. The transaction runs out of gas and reverts.\",\n      \"suggested_fix\": \"Implement a pagination mechanism for `collectAllProtocolFees` (e.g., taking `start` and `end` indices) to allow processing the array in chunks.\"\n    }\n  ],\n  \"overall_explanation\": \"The contract contains a critical race condition during the initialization phase where pools can be deployed with an unconfigured `gaugeManager`, leading to permanently broken pools occupying registry slots. Additionally, the bulk fee collection function is vulnerable to a standard unbounded loop Denial of Service attack.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": false,
+    "context_file_count": 0,
+    "has_protocol_doc": true
+  },
+  "api_metrics": {
+    "input_tokens": 3670,
+    "output_tokens": 9154,
+    "latency_ms": 95062.0551109314
+  }
+}

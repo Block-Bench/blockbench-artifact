@@ -1,0 +1,51 @@
+{
+  "sample_id": "gs_020",
+  "dataset": "gs",
+  "prompt_type": "direct",
+  "model": "gemini-3-pro-hyper-extended",
+  "timestamp": "2026-01-05T13:31:08.067292+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "signature_replay",
+    "vulnerable_functions": [
+      "beforeSwap"
+    ],
+    "severity": "medium",
+    "description": "Both UniswapV4KEMHook and PancakeSwapInfinityKEMHook rebuild a quote digest by hashing sender, key, params.zeroForOne, maxAmountIn, maxExchangeRate, exchangeRateDenom, nonce, and expiryTime. The tuple ties the authorization to the router (sender), the full PoolKey (which includes the hook address), trade direction, price and input caps, nonce and expiry. Crucially, no domain separator is folded in: chain ID, deployment salt, and contract identity outside key are absent. If the same hook instance (or the same PoolKey) is deployed on multiple networks, as CREATE3-based salt mining allows, an attacker can lift any valid signature+nonce from chain A and replay it on chain B. Because the digest matches, SignatureChecker.isValidSignatureNow succeeds and the swap executes without the signer's intention. That breaks the core guarantee that signed quotes are single-instance authorizations, allowing cross-chain replay swaps.",
+    "root_cause": "Both UniswapV4KEMHook and PancakeSwapInfinityKEMHook rebuild a quote digest by hashing sender, key, params.zeroForOne, maxAmountIn, maxExchangeRate, exchangeRateDenom, nonce, and expiryTime. The tuple ties the authorization to the router (sender), the full PoolKey (which includes the hook address), trade direction, price and input caps, nonce and expiry. Crucially, no domain separator is folded in: chain ID, deployment salt, and contract identity outside key are absent. If the same hook instance (or the same PoolKey) is deployed on multiple networks, as CREATE3-based salt mining allows, an attacker can lift any valid signature+nonce from chain A and replay it on chain B. Because the digest matches, SignatureChecker.isValidSignatureNow succeeds and the swap executes without the signer's intention. That breaks the core guarantee that signed quotes are single-instance authorizations, allowing cross-chain replay swaps.",
+    "attack_scenario": "1. Kyber deploys UniswapV4KEMHook on Ethereum mainnet with a specific PoolKey\n2. Same hook (or same PoolKey configuration) is deployed on Arbitrum using CREATE3 salt mining to get matching address\n3. User requests a quote on Ethereum, quoteSigner signs: keccak256(abi.encode(sender, key, zeroForOne, maxAmountIn, maxExchangeRate, exchangeRateDenom, nonce, expiryTime))\n4. User broadcasts swap transaction on Ethereum mainnet\n5. Attacker observes the transaction in Ethereum mempool, extracts signature and hookData\n6. Attacker submits identical calldata on Arbitrum before expiryTime\n7. On Arbitrum: sender (router) matches, key matches (same pool configuration), all other parameters match\n8. SignatureChecker.isValidSignatureNow(quoteSigner, digest, signature) returns true\n9. Swap executes on Arbitrum without signer's intention\n10. If nonce != 0, Ethereum swap may still succeed (different nonce storage per chain), causing double execution",
+    "fix_description": "Introduce domain separation for the signed payload in both hooks. Adopt an EIP712 domain that at minimum commits to chainid. This ensures signatures are only valid on the intended chain.",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.9,
+    "vulnerabilities": [
+      {
+        "type": "Signature Replay",
+        "severity": "medium",
+        "vulnerable_function": "beforeSwap",
+        "location": "UniswapV4KEMHook.sol:beforeSwap",
+        "explanation": "The signature verification in `beforeSwap` constructs a digest using `sender`, `key`, `params`, and other swap details but fails to include `block.chainid`. This allows a valid signature generated for a swap on one chain to be replayed on another chain if the hook contract is deployed at the same address (via CREATE2) and the pool tokens share the same addresses (common for bridged tokens or standard deployments). This exposes the `quoteSigner` (Market Maker) to cross-chain arbitrage where a quote intended for one market environment is forced to execute in another.",
+        "attack_scenario": "1. The Market Maker (quoteSigner) signs a quote for a user to swap TokenA for TokenB on Chain A (e.g., Optimism).\n2. The hook contract exists at the same address on Chain B (e.g., Arbitrum), and TokenA/TokenB have matching addresses.\n3. An attacker (or the user) observes the signature on Chain A.\n4. The attacker initiates a swap on Chain B using the same parameters and the captured signature.\n5. `beforeSwap` on Chain B calculates the same digest (as chain ID is missing) and accepts the signature.\n6. The swap executes on Chain B using Chain A's pricing terms, potentially causing financial loss to the Market Maker.",
+        "suggested_fix": "Include `block.chainid` in the digest construction to bind the signature to a specific chain. Ideally, implement EIP-712 with a proper Domain Separator.\n\n```solidity\nbytes32 digest = keccak256(\n  abi.encode(\n    block.chainid, // Add this\n    sender,\n    key,\n    // ... other params\n  )\n);\n```"
+      }
+    ],
+    "overall_explanation": "The contract implements a Uniswap V4 hook for managing 'Excess Gain' tokens with signed quotes. The logic for calculating and minting excess gains appears sound within the V4 architecture (using `afterSwap` return deltas and ERC6909 minting). However, the contract contains a significant vulnerability regarding signature replay protection. The `beforeSwap` function validates signatures without checking the chain ID. This omission allows signatures to be replayed across different chains if the deployment addresses match, which is a common practice. This could lead to the Market Maker executing trades at stale or incorrect prices relative to the chain's market."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.9,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Signature Replay\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"beforeSwap\",\n      \"location\": \"UniswapV4KEMHook.sol:beforeSwap\",\n      \"explanation\": \"The signature verification in `beforeSwap` constructs a digest using `sender`, `key`, `params`, and other swap details but fails to include `block.chainid`. This allows a valid signature generated for a swap on one chain to be replayed on another chain if the hook contract is deployed at the same address (via CREATE2) and the pool tokens share the same addresses (common for bridged tokens or standard deployments). This exposes the `quoteSigner` (Market Maker) to cross-chain arbitrage where a quote intended for one market environment is forced to execute in another.\",\n      \"attack_scenario\": \"1. The Market Maker (quoteSigner) signs a quote for a user to swap TokenA for TokenB on Chain A (e.g., Optimism).\\n2. The hook contract exists at the same address on Chain B (e.g., Arbitrum), and TokenA/TokenB have matching addresses.\\n3. An attacker (or the user) observes the signature on Chain A.\\n4. The attacker initiates a swap on Chain B using the same parameters and the captured signature.\\n5. `beforeSwap` on Chain B calculates the same digest (as chain ID is missing) and accepts the signature.\\n6. The swap executes on Chain B using Chain A's pricing terms, potentially causing financial loss to the Market Maker.\",\n      \"suggested_fix\": \"Include `block.chainid` in the digest construction to bind the signature to a specific chain. Ideally, implement EIP-712 with a proper Domain Separator.\\n\\n```solidity\\nbytes32 digest = keccak256(\\n  abi.encode(\\n    block.chainid, // Add this\\n    sender,\\n    key,\\n    // ... other params\\n  )\\n);\\n```\"\n    }\n  ],\n  \"overall_explanation\": \"The contract implements a Uniswap V4 hook for managing 'Excess Gain' tokens with signed quotes. The logic for calculating and minting excess gains appears sound within the V4 architecture (using `afterSwap` return deltas and ERC6909 minting). However, the contract contains a significant vulnerability regarding signature replay protection. The `beforeSwap` function validates signatures without checking the chain ID. This omission allows signatures to be replayed across different chains if the deployment addresses match, which is a common practice. This could lead to the Market Maker executing trades at stale or incorrect prices relative to the chain's market.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": false,
+    "context_file_count": 0,
+    "has_protocol_doc": false
+  },
+  "api_metrics": {
+    "input_tokens": 2468,
+    "output_tokens": 11970,
+    "latency_ms": 123041.90587997437
+  }
+}

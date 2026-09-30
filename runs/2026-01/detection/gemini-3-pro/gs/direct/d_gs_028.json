@@ -1,0 +1,51 @@
+{
+  "sample_id": "gs_028",
+  "dataset": "gs",
+  "prompt_type": "direct",
+  "model": "gemini-3-pro-hyper-extended",
+  "timestamp": "2026-01-05T13:47:43.687103+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "access_control",
+    "vulnerable_functions": [
+      "recover"
+    ],
+    "severity": "high",
+    "description": "When a wallet is behind a checkpointer and a chained signature is used with bit 6 (checkpointer usage flag) set to zero, BaseSig.recover skips the checkpointer validation block (BaseSig.sol:88-106). This leaves _checkpointer and snapshot unset (zero-valued). In recoverChained, the checkpointer is ignored, and the signature validation passes even if the checkpointer should be enforced. The final validation succeeds because snapshot.imageHash == bytes32(0) as the checkpointer is ignored.",
+    "root_cause": "When a wallet is behind a checkpointer and a chained signature is used with bit 6 (checkpointer usage flag) set to zero, BaseSig.recover skips the checkpointer validation block (BaseSig.sol:88-106). This leaves _checkpointer and snapshot unset (zero-valued). In recoverChained, the checkpointer is ignored, and the signature validation passes even if the checkpointer should be enforced. The final validation succeeds because snapshot.imageHash == bytes32(0) as the checkpointer is ignored.",
+    "attack_scenario": "An evicted signer can sign a payload valid under stale wallet configuration and bypass checkpointer validation. PoC: Add test case to BaseSigTest and run forge test --match-test test_PoC_checkpointer_bypass. The test constructs a chained signature with checkpointer disabled, mocks the checkpointer response, and asserts successful recovery with correct image hash.",
+    "fix_description": "Do not permit checkpointer to be disabled (bit 6 unset) if chained signature is used. Revert in this case with custom error. Example fix in BaseSig.sol:\nif (signatureFlag & 0x40 == 0) {\n    revert MissingCheckpointer();\n}",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.95,
+    "vulnerabilities": [
+      {
+        "type": "Authentication Bypass",
+        "severity": "critical",
+        "vulnerable_function": "recover",
+        "location": "BaseSig.sol",
+        "explanation": "The `recover` and `recoverChained` functions contain a logic flaw that allows signature validation to be bypassed. The code intends to verify that the recovered `imageHash` matches the stored `snapshot.imageHash`. However, the check is skipped if the recovered `checkpoint` is greater than the `snapshot.checkpoint`. This allows an attacker to forge a valid signature for any wallet by simply creating a signature with a checkpoint higher than the wallet's current checkpoint. The attacker does not need to possess the private keys of the actual owners; they only need to sign with their own key and assert a new configuration.",
+        "attack_scenario": "1. Attacker identifies a target wallet using `BaseSig`. \n2. Attacker queries the wallet's current checkpoint (e.g., 5).\n3. Attacker constructs a `Payload` for a transaction they want to execute (e.g., drain funds).\n4. Attacker creates a signature using their own private key. In the signature data, they define a new signer tree containing only their address and set the checkpoint to 6 (5 + 1).\n5. Attacker submits the transaction.\n6. `BaseSig.recover` is called. It recovers the attacker's address and computes the attacker's `imageHash`.\n7. The validation check `if (... && checkpoint <= snapshot.checkpoint)` evaluates to false because `6 <= 5` is false.\n8. The function returns success, and the wallet executes the attacker's transaction.",
+        "suggested_fix": "The validation logic must strictly enforce that the signature matches the current snapshot, or that a chain of signatures correctly transitions from the current snapshot to the new state. \n\nIn `recover` (non-chained path), remove the checkpoint bypass:\n```solidity\nif (snapshot.imageHash != bytes32(0) && snapshot.imageHash != imageHash) {\n  revert UnusedSnapshot(snapshot);\n}\n```\n\nIn `recoverChained`, ensure the chain links to the snapshot:\n```solidity\n// At the end of the function\nif (_snapshot.imageHash != bytes32(0)) {\n  revert UnusedSnapshot(_snapshot);\n}\n```"
+      }
+    ],
+    "overall_explanation": "The `BaseSig` library has a critical authentication bypass vulnerability. The logic intended to validate signatures against the wallet's stored state (snapshot) explicitly allows the check to be skipped if the signature presents a newer checkpoint. This breaks the chain of trust, as it allows any arbitrary configuration to be accepted as valid without proving authorization from the previous configuration. An attacker can exploit this to take full control of any wallet using this library."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "Based on the analysis of the `BaseSig` library, a critical security vulnerability has been identified.\n\n### Vulnerability Analysis\n\nThe `BaseSig` library is responsible for recovering and validating signatures for a smart contract wallet (likely Sequence). It supports signature chaining to handle configuration updates (e.g., changing signers). The core security mechanism relies on comparing the recovered `imageHash` (Merkle root of signers) and `checkpoint` against a `snapshot` stored in a `Checkpointer` contract.\n\nThe vulnerability lies in the logic that validates the recovered signature against the snapshot. Specifically, the code explicitly allows a signature to bypass the `imageHash` check if the signature's `checkpoint` is strictly greater than the snapshot's `checkpoint`.\n\nIn `recover`:\n```solidity\n// If the snapshot is used, either the imageHash must match\n// or the checkpoint must be greater than the snapshot checkpoint\nif (snapshot.imageHash != bytes32(0) && snapshot.imageHash != imageHash && checkpoint <= snapshot.checkpoint) {\n  revert UnusedSnapshot(snapshot);\n}\n```\n\nIn `recoverChained`:\n```solidity\nif (_snapshot.imageHash != bytes32(0) && checkpoint <= _snapshot.checkpoint) {\n  revert UnusedSnapshot(_snapshot);\n}\n```\n\nIn both cases, if `checkpoint > snapshot.checkpoint`, the condition `checkpoint <= snapshot.checkpoint` evaluates to `false`, causing the `if` statement to be skipped. This means the code does **not** revert, even if `snapshot.imageHash != imageHash`.\n\nThis logic assumes that a \"newer\" signature (higher checkpoint) is authoritative. However, without verifying that the new state was authorized by the old state (via a chained signature linking the two), this allows **any** arbitrary signature to be accepted as valid simply by choosing a `checkpoint` higher than the current one.\n\nAn attacker can construct a signature payload with a malicious signer tree (where they are the sole signer) and a checkpoint of `current_checkpoint + 1`. The `recover` function will calculate the attacker's `imageHash`, see that the checkpoint is newer, bypass the validation check, and return the attacker's weight and threshold as valid.\n\n```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.95,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Authentication Bypass\",\n      \"severity\": \"critical\",\n      \"vulnerable_function\": \"recover\",\n      \"location\": \"BaseSig.sol\",\n      \"explanation\": \"The `recover` and `recoverChained` functions contain a logic flaw that allows signature validation to be bypassed. The code intends to verify that the recovered `imageHash` matches the stored `snapshot.imageHash`. However, the check is skipped if the recovered `checkpoint` is greater than the `snapshot.checkpoint`. This allows an attacker to forge a valid signature for any wallet by simply creating a signature with a checkpoint higher than the wallet's current checkpoint. The attacker does not need to possess the private keys of the actual owners; they only need to sign with their own key and assert a new configuration.\",\n      \"attack_scenario\": \"1. Attacker identifies a target wallet using `BaseSig`. \\n2. Attacker queries the wallet's current checkpoint (e.g., 5).\\n3. Attacker constructs a `Payload` for a transaction they want to execute (e.g., drain funds).\\n4. Attacker creates a signature using their own private key. In the signature data, they define a new signer tree containing only their address and set the checkpoint to 6 (5 + 1).\\n5. Attacker submits the transaction.\\n6. `BaseSig.recover` is called. It recovers the attacker's address and computes the attacker's `imageHash`.\\n7. The validation check `if (... && checkpoint <= snapshot.checkpoint)` evaluates to false because `6 <= 5` is false.\\n8. The function returns success, and the wallet executes the attacker's transaction.\",\n      \"suggested_fix\": \"The validation logic must strictly enforce that the signature matches the current snapshot, or that a chain of signatures correctly transitions from the current snapshot to the new state. \\n\\nIn `recover` (non-chained path), remove the checkpoint bypass:\\n```solidity\\nif (snapshot.imageHash != bytes32(0) && snapshot.imageHash != imageHash) {\\n  revert UnusedSnapshot(snapshot);\\n}\\n```\\n\\nIn `recoverChained`, ensure the chain links to the snapshot:\\n```solidity\\n// At the end of the function\\nif (_snapshot.imageHash != bytes32(0)) {\\n  revert UnusedSnapshot(_snapshot);\\n}\\n```\"\n    }\n  ],\n  \"overall_explanation\": \"The `BaseSig` library has a critical authentication bypass vulnerability. The logic intended to validate signatures against the wallet's stored state (snapshot) explicitly allows the check to be skipped if the signature presents a newer checkpoint. This breaks the chain of trust, as it allows any arbitrary configuration to be accepted as valid without proving authorization from the previous configuration. An attacker can exploit this to take full control of any wallet using this library.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": true,
+    "context_file_count": 1,
+    "has_protocol_doc": false
+  },
+  "api_metrics": {
+    "input_tokens": 8238,
+    "output_tokens": 14586,
+    "latency_ms": 150065.89603424072
+  }
+}

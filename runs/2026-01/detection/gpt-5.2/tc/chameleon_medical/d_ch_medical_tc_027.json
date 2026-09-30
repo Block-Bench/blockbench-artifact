@@ -1,0 +1,57 @@
+{
+  "sample_id": "ch_medical_tc_027",
+  "variant": "chameleon_medical",
+  "model": "gpt-5.2",
+  "prompt_type": "direct",
+  "timestamp": "2026-01-05T03:47:35.524860+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "arithmetic_error",
+    "vulnerable_function": "insertAvailableresources",
+    "vulnerable_lines": [
+      19
+    ],
+    "severity": null
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.9,
+    "vulnerabilities": [
+      {
+        "type": "Share inflation / pool draining via flawed liquidity minting formula (single-sided deposit exploit)",
+        "severity": "critical",
+        "vulnerable_lines": [
+          16,
+          17,
+          19
+        ],
+        "location": "insertAvailableresources()",
+        "explanation": "The minting formula averages the proportional contributions of two \u201cassets\u201d (base and credential): availableresourcesUnits = (baseProportion + credentialFactor) / 2. This allows an attacker to deposit only one side (e.g., only credential) and still receive a large amount of pool units, because the missing side contributes 0 but the other side contributes fully, and the average still mints significant units. Those units can then be burned in dischargeAvailableresources() to withdraw a pro-rata share of BOTH baseQuantity and credentialQuantity, effectively extracting some of the asset they never provided. Root cause is using an arithmetic mean of the two proportional contributions rather than enforcing balanced deposits or using a minting rule that prevents value extraction from imbalance.",
+        "attack_scenario": "1) Assume pool state: baseQuantity=100, credentialQuantity=100, totalamountUnits=100.\n2) Attacker calls insertAvailableresources(intakeBase=0, submissionCredential=100).\n   - baseProportion = 0\n   - credentialFactor = 100*100/100 = 100\n   - minted units = (0+100)/2 = 50\n3) Attacker calls dischargeAvailableresources(50).\n   - outcomeBase = 50*100/150 = 33 (floor)\n   - resultCredential = 50*200/150 = 66\n4) Net: attacker deposited 0 base and 100 credential, but withdrew ~33 base and 66 credential, stealing ~33 base from the pool. Repeating drains one side.",
+        "suggested_fix": "Do not use an arithmetic mean for minting shares in a multi-asset pool.\nConcrete options:\n- Enforce proportional deposits: require intakeBase * credentialQuantity == submissionCredential * baseQuantity (within tolerance) when totalamountUnits > 0.\n- Mint based on the limiting side: availableresourcesUnits = min(baseProportion, credentialFactor).\n- Use a well-established AMM/share-minting model (e.g., geometric mean for initial liquidity and min(proportional) thereafter).\nAlso consider supporting explicit single-sided deposits only with a swap/fee mechanism, not free minting."
+      },
+      {
+        "type": "Denial of service (division by zero) from allowing zero credentialQuantity with nonzero totalamountUnits",
+        "severity": "medium",
+        "vulnerable_lines": [
+          17
+        ],
+        "location": "insertAvailableresources()",
+        "explanation": "credentialFactor divides by credentialQuantity. The contract allows the first depositor to set submissionCredential=0 while minting units based on intakeBase (when totalamountUnits==0). This leads to a state where totalamountUnits > 0 but credentialQuantity == 0. Any subsequent call to insertAvailableresources() will revert due to division by zero at line 17, permanently preventing further deposits (a persistent DoS) unless the contract is reset (which it cannot be).",
+        "attack_scenario": "1) Attacker calls insertAvailableresources(intakeBase=1, submissionCredential=0) as the first depositor.\n   - totalamountUnits becomes 1\n   - credentialQuantity remains 0\n2) Any later user calling insertAvailableresources(...) hits line 17: (submissionCredential * totalamountUnits) / credentialQuantity, dividing by 0, so the transaction reverts.\n3) Result: deposits are bricked indefinitely (DoS on pool growth).",
+        "suggested_fix": "Prevent zero denominators when totalamountUnits > 0:\n- On first deposit, require both intakeBase > 0 AND submissionCredential > 0; or\n- If supporting single-asset pools, branch logic: when credentialQuantity==0 treat the system as single-asset and avoid division by zero (and adjust withdrawal/mint logic accordingly).\nAdditionally add explicit checks: require(baseQuantity > 0 && credentialQuantity > 0) before performing proportional calculations when totalamountUnits > 0."
+      }
+    ],
+    "overall_explanation": "The contract\u2019s core accounting is unsafe. The liquidity/share minting formula in insertAvailableresources() uses an arithmetic mean of two proportional contributions, enabling a concrete single-sided deposit attack that mints excess units and then withdraws some of the other asset, draining pool balances (critical). Additionally, the contract can be permanently DoS\u2019d for future deposits if the first deposit sets submissionCredential=0, creating credentialQuantity==0 while totalamountUnits>0 and causing division-by-zero reverts on subsequent inserts (medium)."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.9,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Share inflation / pool draining via flawed liquidity minting formula (single-sided deposit exploit)\",\n      \"severity\": \"critical\",\n      \"vulnerable_lines\": [16, 17, 19],\n      \"location\": \"insertAvailableresources()\",\n      \"explanation\": \"The minting formula averages the proportional contributions of two \u201cassets\u201d (base and credential): availableresourcesUnits = (baseProportion + credentialFactor) / 2. This allows an attacker to deposit only one side (e.g., only credential) and still receive a large amount of pool units, because the missing side contributes 0 but the other side contributes fully, and the average still mints significant units. Those units can then be burned in dischargeAvailableresources() to withdraw a pro-rata share of BOTH baseQuantity and credentialQuantity, effectively extracting some of the asset they never provided. Root cause is using an arithmetic mean of the two proportional contributions rather than enforcing balanced deposits or using a minting rule that prevents value extraction from imbalance.\",\n      \"attack_scenario\": \"1) Assume pool state: baseQuantity=100, credentialQuantity=100, totalamountUnits=100.\\n2) Attacker calls insertAvailableresources(intakeBase=0, submissionCredential=100).\\n   - baseProportion = 0\\n   - credentialFactor = 100*100/100 = 100\\n   - minted units = (0+100)/2 = 50\\n3) Attacker calls dischargeAvailableresources(50).\\n   - outcomeBase = 50*100/150 = 33 (floor)\\n   - resultCredential = 50*200/150 = 66\\n4) Net: attacker deposited 0 base and 100 credential, but withdrew ~33 base and 66 credential, stealing ~33 base from the pool. Repeating drains one side.\",\n      \"suggested_fix\": \"Do not use an arithmetic mean for minting shares in a multi-asset pool.\\nConcrete options:\\n- Enforce proportional deposits: require intakeBase * credentialQuantity == submissionCredential * baseQuantity (within tolerance) when totalamountUnits > 0.\\n- Mint based on the limiting side: availableresourcesUnits = min(baseProportion, credentialFactor).\\n- Use a well-established AMM/share-minting model (e.g., geometric mean for initial liquidity and min(proportional) thereafter).\\nAlso consider supporting explicit single-sided deposits only with a swap/fee mechanism, not free minting.\"\n    },\n    {\n      \"type\": \"Denial of service (division by zero) from allowing zero credentialQuantity with nonzero totalamountUnits\",\n      \"severity\": \"medium\",\n      \"vulnerable_lines\": [17],\n      \"location\": \"insertAvailableresources()\",\n      \"explanation\": \"credentialFactor divides by credentialQuantity. The contract allows the first depositor to set submissionCredential=0 while minting units based on intakeBase (when totalamountUnits==0). This leads to a state where totalamountUnits > 0 but credentialQuantity == 0. Any subsequent call to insertAvailableresources() will revert due to division by zero at line 17, permanently preventing further deposits (a persistent DoS) unless the contract is reset (which it cannot be).\",\n      \"attack_scenario\": \"1) Attacker calls insertAvailableresources(intakeBase=1, submissionCredential=0) as the first depositor.\\n   - totalamountUnits becomes 1\\n   - credentialQuantity remains 0\\n2) Any later user calling insertAvailableresources(...) hits line 17: (submissionCredential * totalamountUnits) / credentialQuantity, dividing by 0, so the transaction reverts.\\n3) Result: deposits are bricked indefinitely (DoS on pool growth).\",\n      \"suggested_fix\": \"Prevent zero denominators when totalamountUnits > 0:\\n- On first deposit, require both intakeBase > 0 AND submissionCredential > 0; or\\n- If supporting single-asset pools, branch logic: when credentialQuantity==0 treat the system as single-asset and avoid division by zero (and adjust withdrawal/mint logic accordingly).\\nAdditionally add explicit checks: require(baseQuantity > 0 && credentialQuantity > 0) before performing proportional calculations when totalamountUnits > 0.\"\n    }\n  ],\n  \"overall_explanation\": \"The contract\u2019s core accounting is unsafe. The liquidity/share minting formula in insertAvailableresources() uses an arithmetic mean of two proportional contributions, enabling a concrete single-sided deposit attack that mints excess units and then withdraws some of the other asset, draining pool balances (critical). Additionally, the contract can be permanently DoS\u2019d for future deposits if the first deposit sets submissionCredential=0, creating credentialQuantity==0 while totalamountUnits>0 and causing division-by-zero reverts on subsequent inserts (medium).\"\n}\n```"
+  },
+  "api_metrics": {
+    "input_tokens": 1402,
+    "output_tokens": 2779,
+    "latency_ms": 56318.01772117615
+  }
+}

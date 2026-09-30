@@ -1,0 +1,51 @@
+{
+  "sample_id": "gs_020",
+  "dataset": "gs",
+  "prompt_type": "direct",
+  "model": "claude-opus-4-5",
+  "timestamp": "2026-05-25T06:34:11.719785+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "signature_replay",
+    "vulnerable_functions": [
+      "beforeSwap"
+    ],
+    "severity": "medium",
+    "description": "Both UniswapV4KEMHook and PancakeSwapInfinityKEMHook rebuild a quote digest by hashing sender, key, params.zeroForOne, maxAmountIn, maxExchangeRate, exchangeRateDenom, nonce, and expiryTime. The tuple ties the authorization to the router (sender), the full PoolKey (which includes the hook address), trade direction, price and input caps, nonce and expiry. Crucially, no domain separator is folded in: chain ID, deployment salt, and contract identity outside key are absent. If the same hook instance (or the same PoolKey) is deployed on multiple networks, as CREATE3-based salt mining allows, an attacker can lift any valid signature+nonce from chain A and replay it on chain B. Because the digest matches, SignatureChecker.isValidSignatureNow succeeds and the swap executes without the signer's intention. That breaks the core guarantee that signed quotes are single-instance authorizations, allowing cross-chain replay swaps.",
+    "root_cause": "Both UniswapV4KEMHook and PancakeSwapInfinityKEMHook rebuild a quote digest by hashing sender, key, params.zeroForOne, maxAmountIn, maxExchangeRate, exchangeRateDenom, nonce, and expiryTime. The tuple ties the authorization to the router (sender), the full PoolKey (which includes the hook address), trade direction, price and input caps, nonce and expiry. Crucially, no domain separator is folded in: chain ID, deployment salt, and contract identity outside key are absent. If the same hook instance (or the same PoolKey) is deployed on multiple networks, as CREATE3-based salt mining allows, an attacker can lift any valid signature+nonce from chain A and replay it on chain B. Because the digest matches, SignatureChecker.isValidSignatureNow succeeds and the swap executes without the signer's intention. That breaks the core guarantee that signed quotes are single-instance authorizations, allowing cross-chain replay swaps.",
+    "attack_scenario": "1. Kyber deploys UniswapV4KEMHook on Ethereum mainnet with a specific PoolKey\n2. Same hook (or same PoolKey configuration) is deployed on Arbitrum using CREATE3 salt mining to get matching address\n3. User requests a quote on Ethereum, quoteSigner signs: keccak256(abi.encode(sender, key, zeroForOne, maxAmountIn, maxExchangeRate, exchangeRateDenom, nonce, expiryTime))\n4. User broadcasts swap transaction on Ethereum mainnet\n5. Attacker observes the transaction in Ethereum mempool, extracts signature and hookData\n6. Attacker submits identical calldata on Arbitrum before expiryTime\n7. On Arbitrum: sender (router) matches, key matches (same pool configuration), all other parameters match\n8. SignatureChecker.isValidSignatureNow(quoteSigner, digest, signature) returns true\n9. Swap executes on Arbitrum without signer's intention\n10. If nonce != 0, Ethereum swap may still succeed (different nonce storage per chain), causing double execution",
+    "fix_description": "Introduce domain separation for the signed payload in both hooks. Adopt an EIP712 domain that at minimum commits to chainid. This ensures signatures are only valid on the intended chain.",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.92,
+    "vulnerabilities": [
+      {
+        "type": "signature_replay",
+        "severity": "medium",
+        "vulnerable_function": "beforeSwap",
+        "location": "UniswapV4KEMHook.beforeSwap()",
+        "explanation": "The signature verification in beforeSwap() lacks a domain separator (EIP-712 style). The digest is computed by hashing sender, key, params.zeroForOne, maxAmountIn, maxExchangeRate, exchangeRateDenom, nonce, and expiryTime. Critically, chain ID and contract address are not included in the digest. If the same hook contract (or identical PoolKey) is deployed on multiple chains using deterministic deployment (CREATE2/CREATE3), a valid signature from chain A can be replayed on chain B. The nonce tracking is per-contract, so a nonce used on chain A would still be unused on chain B, allowing the replay to succeed.",
+        "attack_scenario": "1. Attacker monitors chain A for valid swap transactions with signed quotes. 2. Attacker extracts the hookData containing maxAmountIn, maxExchangeRate, exchangeRateDenom, nonce, expiryTime, and signature. 3. If the same hook is deployed on chain B with identical address (via CREATE3) and the same PoolKey exists, attacker submits the same swap on chain B. 4. Since the digest computation doesn't include chainId, the signature validates successfully. 5. The nonce hasn't been used on chain B, so _useUnorderedNonce passes. 6. The swap executes on chain B without the signer's authorization for that chain, potentially at unfavorable rates if market conditions differ.",
+        "suggested_fix": "Implement EIP-712 domain separation. Add a DOMAIN_SEPARATOR that includes chainId, contract address, and optionally a salt. Compute digest as: keccak256(abi.encodePacked('\\x19\\x01', DOMAIN_SEPARATOR, structHash)). The DOMAIN_SEPARATOR should be: keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256(bytes(name)), keccak256(bytes(version)), block.chainid, address(this))). This ensures signatures are only valid on the intended chain and contract instance."
+      }
+    ],
+    "overall_explanation": "The UniswapV4KEMHook contract contains a cross-chain signature replay vulnerability in the beforeSwap() function. The signed quote digest does not include chain ID or contract address, violating EIP-712 best practices for signature domain separation. While the PoolKey is included (which contains the hook address), if deterministic deployment is used to deploy the same hook at the same address across multiple chains, signatures become replayable. The nonce mechanism only prevents replay within the same chain/contract instance. This allows an attacker to execute swaps on unintended chains using captured signatures, potentially causing financial loss if market conditions differ between chains. The fix requires implementing proper EIP-712 domain separation."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.92,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"signature_replay\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"beforeSwap\",\n      \"location\": \"UniswapV4KEMHook.beforeSwap()\",\n      \"explanation\": \"The signature verification in beforeSwap() lacks a domain separator (EIP-712 style). The digest is computed by hashing sender, key, params.zeroForOne, maxAmountIn, maxExchangeRate, exchangeRateDenom, nonce, and expiryTime. Critically, chain ID and contract address are not included in the digest. If the same hook contract (or identical PoolKey) is deployed on multiple chains using deterministic deployment (CREATE2/CREATE3), a valid signature from chain A can be replayed on chain B. The nonce tracking is per-contract, so a nonce used on chain A would still be unused on chain B, allowing the replay to succeed.\",\n      \"attack_scenario\": \"1. Attacker monitors chain A for valid swap transactions with signed quotes. 2. Attacker extracts the hookData containing maxAmountIn, maxExchangeRate, exchangeRateDenom, nonce, expiryTime, and signature. 3. If the same hook is deployed on chain B with identical address (via CREATE3) and the same PoolKey exists, attacker submits the same swap on chain B. 4. Since the digest computation doesn't include chainId, the signature validates successfully. 5. The nonce hasn't been used on chain B, so _useUnorderedNonce passes. 6. The swap executes on chain B without the signer's authorization for that chain, potentially at unfavorable rates if market conditions differ.\",\n      \"suggested_fix\": \"Implement EIP-712 domain separation. Add a DOMAIN_SEPARATOR that includes chainId, contract address, and optionally a salt. Compute digest as: keccak256(abi.encodePacked('\\\\x19\\\\x01', DOMAIN_SEPARATOR, structHash)). The DOMAIN_SEPARATOR should be: keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256(bytes(name)), keccak256(bytes(version)), block.chainid, address(this))). This ensures signatures are only valid on the intended chain and contract instance.\"\n    }\n  ],\n  \"overall_explanation\": \"The UniswapV4KEMHook contract contains a cross-chain signature replay vulnerability in the beforeSwap() function. The signed quote digest does not include chain ID or contract address, violating EIP-712 best practices for signature domain separation. While the PoolKey is included (which contains the hook address), if deterministic deployment is used to deploy the same hook at the same address across multiple chains, signatures become replayable. The nonce mechanism only prevents replay within the same chain/contract instance. This allows an attacker to execute swaps on unintended chains using captured signatures, potentially causing financial loss if market conditions differ between chains. The fix requires implementing proper EIP-712 domain separation.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": false,
+    "context_file_count": 0,
+    "has_protocol_doc": false
+  },
+  "api_metrics": {
+    "input_tokens": 3417,
+    "output_tokens": 732,
+    "latency_ms": 13190.384864807129
+  }
+}

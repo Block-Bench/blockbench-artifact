@@ -1,0 +1,51 @@
+{
+  "sample_id": "gs_004",
+  "dataset": "gs",
+  "prompt_type": "context_protocol_cot",
+  "model": "gpt-5.2",
+  "timestamp": "2026-01-05T13:47:16.000644+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "logic_error",
+    "vulnerable_functions": [
+      "deposit"
+    ],
+    "severity": "medium",
+    "description": "The gHYBR contract is just another veNFT position holder from the perspective of votingEscrow contract, while the gHYBR contract acts as a vault. And the deposit does not ensure that we mint at least one gHYBR share. This can lead to a condition where the first depositor attacks another user. Example: - Alice deposits dust shares, 1 share : 1 asset - Alice donates 1000e18 assets before Bob deposits, through deposit_for, and he increased the ratio by 1 shares : 1000e18 assets - Bob deposits 100e18 assets, the shares calculation goes 100e18 * 1 / 1000e18 and rounds down to 0 - Receives 0 shares - All bob\u2019s deposit is captured by Alice\u2019s shares - Bob deposits 100e18 assets and receives 0 shares - Alice has 1 share worth 1000e18 + 100e18(bob's) assets The entry points the attacker can use to perform this attack are: 1. The votingEscrow contract allows anyone to deposit assets for any position through its public deposit_for(uint _tokenId, uint _value) external nonreentrant function. 2. The receivePenaltyReward function in GovernanceHYBR contract lacks access control, which allows an attacker to donate to increase totalAssets. 3. Attacker can utilize multiSplit through withdraw, by first depositing 1000:1000 and withdrawing so that the leftover is 1:1 ratio dust. Impact: Alice captures all of Bob\u2019s deposits.",
+    "root_cause": "The gHYBR contract is just another veNFT position holder from the perspective of votingEscrow contract, while the gHYBR contract acts as a vault. And the deposit does not ensure that we mint at least one gHYBR share. This can lead to a condition where the first depositor attacks another user. Example: - Alice deposits dust shares, 1 share : 1 asset - Alice donates 1000e18 assets before Bob deposits, through deposit_for, and he increased the ratio by 1 shares : 1000e18 assets - Bob deposits 100e18 assets, the shares calculation goes 100e18 * 1 / 1000e18 and rounds down to 0 - Receives 0 shares - All bob\u2019s deposit is captured by Alice\u2019s shares - Bob deposits 100e18 assets and receives 0 shares - Alice has 1 share worth 1000e18 + 100e18(bob's) assets The entry points the attacker can use to perform this attack are: 1. The votingEscrow contract allows anyone to deposit assets for any position through its public deposit_for(uint _tokenId, uint _value) external nonreentrant function. 2. The receivePenaltyReward function in GovernanceHYBR contract lacks access control, which allows an attacker to donate to increase totalAssets. 3. Attacker can utilize multiSplit through withdraw, by first depositing 1000:1000 and withdrawing so that the leftover is 1:1 ratio dust. Impact: Alice captures all of Bob\u2019s deposits.",
+    "attack_scenario": "function test_submissionValidity() external { // first depositor attack address alice = makeAddr(\"alice\"); address bob = makeAddr(\"bob\"); vm.startPrank(address(minter)); hybr.mint(alice, 2000e18); hybr.mint(bob, 100e18); vm.stopPrank(); vm.startPrank(alice); hybr.approve(address(gHybr), type(uint).max); gHybr.deposit(2, alice); hybr.transfer(address(gHybr), 1000e18); // alice transfers 1000 HYBR to gHYBR gHybr.receivePenaltyReward(1000e18); // alice donates 1000 through the receivePenaltyReward function vm.stopPrank(); // bob deposits vm.startPrank(bob); hybr.approve(address(gHybr), 100e18); gHybr.deposit(100e18, bob); vm.stopPrank(); console.log(\"alice's shares: \", gHybr.balanceOf(alice)); console.log(\"bob's shares: \", gHybr.balanceOf(bob)); console.log(\"gHYBR total assets: \", gHybr.totalAssets()); } Run this test and see the result: - Alice\u2019s shares: 2 - Bob\u2019s shares: 0 - gHYBR total assets: 1100000000000000000002 Alice captures all of Bob\u2019s deposits.",
+    "fix_description": "Require `shares > 0` in `deposit`; add access control to `receivePenaltyReward`.",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.85,
+    "vulnerabilities": [
+      {
+        "type": "Share mispricing / value extraction due to wrong share-minting order",
+        "severity": "high",
+        "vulnerable_function": "deposit",
+        "location": "GrowthHYBR.deposit(uint256,address)",
+        "explanation": "Shares are calculated AFTER the deposit has already increased the veNFT\u2019s locked HYBR (via create_lock_for/deposit_for). `calculateShares(amount)` uses `totalAssets()` which now includes the just-deposited `amount`, causing the depositor to receive fewer shares than they should at the pre-deposit exchange rate. This systematically transfers value from new depositors to existing gHYBR holders. It is economically exploitable: anyone holding gHYBR can profit by ensuring large deposits happen after they acquire shares (e.g., MEV/front-running a victim deposit), then later redeeming/withdrawing at the higher post-deposit share price.",
+        "attack_scenario": "1) Pool state: totalAssets=A, totalSupply=S (price ~A/S). 2) Attacker acquires gHYBR shares (e.g., buys from a holder whose transfer lock has expired, or is an early depositor already holding shares). 3) Attacker front-runs (or simply positions before) a large victim deposit of x HYBR. 4) Victim deposit executes: assets become A+x before share calculation, so victim receives x*S/(A+x) shares instead of x*S/A. 5) Share price increases to (A+x)/(S + x*S/(A+x)) > A/S, enriching existing holders. 6) Attacker later withdraws/redeems their shares for more HYBR than they would have been entitled to absent the bug, capturing part of the victim\u2019s deposit value.",
+        "suggested_fix": "Compute shares using pre-deposit totals. For example, in `deposit`, cache `uint256 assetsBefore = totalAssets(); uint256 supplyBefore = totalSupply();` BEFORE calling `create_lock_for`/`deposit_for`, then mint `shares = (supplyBefore==0||assetsBefore==0) ? amount : (amount * supplyBefore) / assetsBefore;`. Alternatively, restructure to mint shares before mutating veNFT assets (while still ensuring the HYBR transfer succeeds) and then deposit/lock the HYBR."
+      }
+    ],
+    "overall_explanation": "GrowthHYBR aims to be a proportional-share wrapper over a pooled veNFT. However, the deposit flow mutates underlying assets before calculating shares, breaking the core invariant that minted shares reflect the pre-deposit exchange rate. This enables systematic value transfer from new depositors to existing share holders and is practically exploitable via positioning/front-running around large deposits."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.85,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Share mispricing / value extraction due to wrong share-minting order\",\n      \"severity\": \"high\",\n      \"vulnerable_function\": \"deposit\",\n      \"location\": \"GrowthHYBR.deposit(uint256,address)\",\n      \"explanation\": \"Shares are calculated AFTER the deposit has already increased the veNFT\u2019s locked HYBR (via create_lock_for/deposit_for). `calculateShares(amount)` uses `totalAssets()` which now includes the just-deposited `amount`, causing the depositor to receive fewer shares than they should at the pre-deposit exchange rate. This systematically transfers value from new depositors to existing gHYBR holders. It is economically exploitable: anyone holding gHYBR can profit by ensuring large deposits happen after they acquire shares (e.g., MEV/front-running a victim deposit), then later redeeming/withdrawing at the higher post-deposit share price.\",\n      \"attack_scenario\": \"1) Pool state: totalAssets=A, totalSupply=S (price ~A/S). 2) Attacker acquires gHYBR shares (e.g., buys from a holder whose transfer lock has expired, or is an early depositor already holding shares). 3) Attacker front-runs (or simply positions before) a large victim deposit of x HYBR. 4) Victim deposit executes: assets become A+x before share calculation, so victim receives x*S/(A+x) shares instead of x*S/A. 5) Share price increases to (A+x)/(S + x*S/(A+x)) > A/S, enriching existing holders. 6) Attacker later withdraws/redeems their shares for more HYBR than they would have been entitled to absent the bug, capturing part of the victim\u2019s deposit value.\",\n      \"suggested_fix\": \"Compute shares using pre-deposit totals. For example, in `deposit`, cache `uint256 assetsBefore = totalAssets(); uint256 supplyBefore = totalSupply();` BEFORE calling `create_lock_for`/`deposit_for`, then mint `shares = (supplyBefore==0||assetsBefore==0) ? amount : (amount * supplyBefore) / assetsBefore;`. Alternatively, restructure to mint shares before mutating veNFT assets (while still ensuring the HYBR transfer succeeds) and then deposit/lock the HYBR.\"\n    }\n  ],\n  \"overall_explanation\": \"GrowthHYBR aims to be a proportional-share wrapper over a pooled veNFT. However, the deposit flow mutates underlying assets before calculating shares, breaking the core invariant that minted shares reflect the pre-deposit exchange rate. This enables systematic value transfer from new depositors to existing share holders and is practically exploitable via positioning/front-running around large deposits.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": false,
+    "context_file_count": 0,
+    "has_protocol_doc": true
+  },
+  "api_metrics": {
+    "input_tokens": 6104,
+    "output_tokens": 3227,
+    "latency_ms": 83342.11707115173
+  }
+}

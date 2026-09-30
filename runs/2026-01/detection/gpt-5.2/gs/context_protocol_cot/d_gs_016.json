@@ -1,0 +1,51 @@
+{
+  "sample_id": "gs_016",
+  "dataset": "gs",
+  "prompt_type": "context_protocol_cot",
+  "model": "gpt-5.2",
+  "timestamp": "2026-01-05T13:58:33.101074+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "logic_error",
+    "vulnerable_functions": [
+      "isGranted"
+    ],
+    "severity": "medium",
+    "description": "In MinVotingPowerCondition.isGranted() at line 45, the function checks 'token.balanceOf(_who) + lockManager.getLockedBalance(_who)'. If an address holds tokens but can't spend them due to being frozen or blacklisted (like USDC/USDT blacklist), they are still granted access to create proposals. The intended behavior should be to not allow calling createProposal as the tokens are not actually transferable.",
+    "root_cause": "In MinVotingPowerCondition.isGranted() at line 45, the function checks 'token.balanceOf(_who) + lockManager.getLockedBalance(_who)'. If an address holds tokens but can't spend them due to being frozen or blacklisted (like USDC/USDT blacklist), they are still granted access to create proposals. The intended behavior should be to not allow calling createProposal as the tokens are not actually transferable.",
+    "attack_scenario": "1. User holds 1000 USDC but is blacklisted by Circle.\n2. User cannot actually transfer or lock their tokens.\n3. User calls createProposal().\n4. isGranted() at line 45 checks token.balanceOf(user) which returns 1000.\n5. User passes the minProposerVotingPower check despite having unusable tokens.\n6. User can spam create proposals without genuine stake in governance.",
+    "fix_description": "Do not use token.balanceOf(_who), rather actually require the tokens to be locked in LockManager by making a transfer. Only check lockManager.getLockedBalance(_who) for voting power, removing the token.balanceOf() portion.",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.74,
+    "vulnerabilities": [
+      {
+        "type": "Denial of service (unbounded iteration) causing inability to withdraw locked funds",
+        "severity": "high",
+        "vulnerable_function": "unlock() (via _withdrawActiveVotingPower())",
+        "location": "LockManagerBase.unlock() / LockManagerBase._withdrawActiveVotingPower()",
+        "explanation": "unlock() calls _withdrawActiveVotingPower(), which iterates over the global EnumerableSet knownProposalIds and performs multiple external calls per iteration (plugin.isProposalOpen(), plugin.usedVotingPower(), and potentially plugin.clearVote()). The set size is unbounded and shared across all users. If knownProposalIds becomes large enough, unlock() can exceed the block gas limit and revert, preventing users from unlocking their tokens (funds stuck). Because any account that can create proposals can cause proposal IDs to be added (via plugin calling proposalCreated()), this can be exploited as a gas-griefing DoS without requiring any trusted role compromise.",
+        "attack_scenario": "1) Attacker acquires the minimum proposer voting power (or otherwise can create proposals).\n2) Attacker creates a very large number of proposals over time (or keeps proposals open long enough) so that LockManagerBase.knownProposalIds grows large.\n3) Any user attempting to unlock() triggers _withdrawActiveVotingPower(), which loops over all knownProposalIds and makes external calls per proposal.\n4) Once the set is large, unlock() consistently runs out of gas and reverts, effectively preventing withdrawals for all users until the proposal set shrinks.",
+        "suggested_fix": "Avoid iterating over a global, unbounded proposal set in unlock(). Options include:\n- Track active proposal IDs per voter (only iterate proposals where the voter has usedVotingPower > 0).\n- Make vote clearing and/or proposal garbage-collection a separate paginated function (e.g., clearVotes(uint256[] proposalIds) or clearVotes(uint256 maxIterations)) that can be called repeatedly.\n- Allow unlock even if votes remain, by enforcing vote power/accounting at the plugin level rather than requiring full clearing in a single transaction.\n- Add a bounded loop with checkpointing (store per-user iteration index) to ensure unlock completes within gas limits."
+      }
+    ],
+    "overall_explanation": "MinVotingPowerCondition itself is a simple balance check and does not introduce an obvious standalone exploit. However, the provided LockManagerBase dependency contains a concrete, exploitable DoS vector: unlock() must scan an unbounded, global proposal ID set and perform external calls per entry, allowing any proposer to bloat the set and make withdrawals revert due to gas exhaustion, potentially trapping users\u2019 locked tokens."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.74,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Denial of service (unbounded iteration) causing inability to withdraw locked funds\",\n      \"severity\": \"high\",\n      \"vulnerable_function\": \"unlock() (via _withdrawActiveVotingPower())\",\n      \"location\": \"LockManagerBase.unlock() / LockManagerBase._withdrawActiveVotingPower()\",\n      \"explanation\": \"unlock() calls _withdrawActiveVotingPower(), which iterates over the global EnumerableSet knownProposalIds and performs multiple external calls per iteration (plugin.isProposalOpen(), plugin.usedVotingPower(), and potentially plugin.clearVote()). The set size is unbounded and shared across all users. If knownProposalIds becomes large enough, unlock() can exceed the block gas limit and revert, preventing users from unlocking their tokens (funds stuck). Because any account that can create proposals can cause proposal IDs to be added (via plugin calling proposalCreated()), this can be exploited as a gas-griefing DoS without requiring any trusted role compromise.\",\n      \"attack_scenario\": \"1) Attacker acquires the minimum proposer voting power (or otherwise can create proposals).\\n2) Attacker creates a very large number of proposals over time (or keeps proposals open long enough) so that LockManagerBase.knownProposalIds grows large.\\n3) Any user attempting to unlock() triggers _withdrawActiveVotingPower(), which loops over all knownProposalIds and makes external calls per proposal.\\n4) Once the set is large, unlock() consistently runs out of gas and reverts, effectively preventing withdrawals for all users until the proposal set shrinks.\",\n      \"suggested_fix\": \"Avoid iterating over a global, unbounded proposal set in unlock(). Options include:\\n- Track active proposal IDs per voter (only iterate proposals where the voter has usedVotingPower > 0).\\n- Make vote clearing and/or proposal garbage-collection a separate paginated function (e.g., clearVotes(uint256[] proposalIds) or clearVotes(uint256 maxIterations)) that can be called repeatedly.\\n- Allow unlock even if votes remain, by enforcing vote power/accounting at the plugin level rather than requiring full clearing in a single transaction.\\n- Add a bounded loop with checkpointing (store per-user iteration index) to ensure unlock completes within gas limits.\"\n    }\n  ],\n  \"overall_explanation\": \"MinVotingPowerCondition itself is a simple balance check and does not introduce an obvious standalone exploit. However, the provided LockManagerBase dependency contains a concrete, exploitable DoS vector: unlock() must scan an unbounded, global proposal ID set and perform external calls per entry, allowing any proposer to bloat the set and make withdrawals revert due to gas exhaustion, potentially trapping users\u2019 locked tokens.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": true,
+    "context_file_count": 1,
+    "has_protocol_doc": true
+  },
+  "api_metrics": {
+    "input_tokens": 3335,
+    "output_tokens": 1715,
+    "latency_ms": 34950.21104812622
+  }
+}

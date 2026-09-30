@@ -1,0 +1,51 @@
+{
+  "sample_id": "gs_019",
+  "dataset": "gs",
+  "prompt_type": "context_protocol",
+  "model": "gpt-5.2",
+  "timestamp": "2026-05-25T13:41:00.553202+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "input_validation",
+    "vulnerable_functions": [
+      "withdrawPhantomToken"
+    ],
+    "severity": "medium",
+    "description": "MidasRedemptionVaultAdapter.withdrawPhantomToken(token, amount) only checks that a phantom token is registered for the given token address (phantomTokenToOutputToken[token] != address(0)) and does not verify that the pending redemption's tokenOut matches the expected underlying. This means the integration may receive a different token than expected if the redemption request was made for a different output token than what the phantom token tracks.",
+    "root_cause": "MidasRedemptionVaultAdapter.withdrawPhantomToken(token, amount) only checks that a phantom token is registered for the given token address (phantomTokenToOutputToken[token] != address(0)) and does not verify that the pending redemption's tokenOut matches the expected underlying. This means the integration may receive a different token than expected if the redemption request was made for a different output token than what the phantom token tracks.",
+    "attack_scenario": "1. Configurator sets up phantom token A tracking output token USDC via setTokenAllowedStatusBatch()\n2. phantomTokenToOutputToken[phantomA] = USDC\n3. User makes a redemption request for output token USDT (different from USDC)\n4. pendingRedemptions records the request with tokenOut = USDT\n5. User calls withdrawPhantomToken(phantomA, amount)\n6. Function checks: phantomTokenToOutputToken[phantomA] != address(0) -> passes (it's USDC)\n7. Function calls _withdraw(amount) which executes Gateway.withdraw()\n8. Gateway.withdraw() transfers USDT (the actual redemption output) not USDC\n9. The phantom token (tracking USDC) and actual withdrawal (USDT) are mismatched\n10. Integration receives unexpected token, potentially causing accounting errors or failed operations",
+    "fix_description": "Add validation in setTokenAllowedStatusBatch() to ensure that the phantom token's tokenOut matches the output token it was added alongside with. This prevents mismatched phantom token configurations.",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.78,
+    "vulnerabilities": [
+      {
+        "type": "input_validation / asset mismatch (phantom token underlying not enforced)",
+        "severity": "medium",
+        "vulnerable_function": "withdrawPhantomToken(address,uint256)",
+        "location": "MidasRedemptionVaultAdapter.withdrawPhantomToken",
+        "explanation": "withdrawPhantomToken() only validates that the provided `token` exists in `phantomTokenToOutputToken` (i.e., is some registered phantom token). It does not validate that the pending redemption to be withdrawn from the gateway corresponds to that phantom token\u2019s tracked `tokenOut`. Since `_withdraw(amount)` calls `IMidasRedemptionVaultGateway.withdraw(amount)` without specifying which `tokenOut` to withdraw, the gateway may withdraw a different underlying than what the caller/credit system expects for the provided phantom token. In Gearbox-style integrations, phantom tokens are used to safely account/price pending redemptions; withdrawing a different asset than the phantom token represents can break accounting invariants (wrong token assumed for balance deltas), potentially leading to unexpected/unsupported tokens appearing on the credit account and operational issues (risk checks/liquidations based on wrong assumptions).",
+        "attack_scenario": "1) System has two allowed outputs with registered phantom tokens: tokenA->pA and tokenB->pB.\n2) Attacker (credit account owner via CreditFacade) calls redeemRequest(tokenB, X), creating pending redemption in tokenB (pB balance > 0).\n3) Once withdrawable, attacker calls withdrawPhantomToken(pA, amount).\n4) Adapter passes the only check (pA is registered) and calls gateway.withdraw(amount).\n5) Gateway withdraws tokenB (the actual pending redemption asset), while the integration call context indicates phantom token pA/tokenA, causing the system to mis-associate the withdrawal with the wrong underlying and potentially leaving tokenB received in the account unexpectedly/unaccounted.",
+        "suggested_fix": "Bind withdrawals to the phantom token\u2019s expected underlying:\n- In withdrawPhantomToken():\n  - `address tokenOut = phantomTokenToOutputToken[token];`\n  - validate `IMidasRedemptionVaultGateway(gateway).pendingTokenOutAmount(_creditAccount(), tokenOut) >= amount` (and/or ensure the gateway\u2019s withdraw logic is for that tokenOut).\n  - additionally validate the phantom token itself: via `IPhantomToken(token).getPhantomTokenInfo()` require returned gateway == `gateway` and underlying == `tokenOut`.\n- In setTokenAllowedStatusBatch(): when setting `config.phantomToken`, enforce that the phantom token\u2019s immutable `tokenOut` (underlying) equals `config.token` (and gateway matches), preventing mismatched configurations."
+      }
+    ],
+    "overall_explanation": "The adapter\u2019s withdrawPhantomToken() does not ensure that the phantom token provided by the caller corresponds to the actual redeemable output token being withdrawn from the gateway. Because gateway.withdraw() is not parameterized by tokenOut, a caller can pass any registered phantom token while withdrawing a different underlying, creating a real asset/phantom mismatch that can break correct accounting and risk assumptions. Other reviewed functions largely rely on configurator-controlled allowlists and standard external call patterns."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.78,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"input_validation / asset mismatch (phantom token underlying not enforced)\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"withdrawPhantomToken(address,uint256)\",\n      \"location\": \"MidasRedemptionVaultAdapter.withdrawPhantomToken\",\n      \"explanation\": \"withdrawPhantomToken() only validates that the provided `token` exists in `phantomTokenToOutputToken` (i.e., is some registered phantom token). It does not validate that the pending redemption to be withdrawn from the gateway corresponds to that phantom token\u2019s tracked `tokenOut`. Since `_withdraw(amount)` calls `IMidasRedemptionVaultGateway.withdraw(amount)` without specifying which `tokenOut` to withdraw, the gateway may withdraw a different underlying than what the caller/credit system expects for the provided phantom token. In Gearbox-style integrations, phantom tokens are used to safely account/price pending redemptions; withdrawing a different asset than the phantom token represents can break accounting invariants (wrong token assumed for balance deltas), potentially leading to unexpected/unsupported tokens appearing on the credit account and operational issues (risk checks/liquidations based on wrong assumptions).\",\n      \"attack_scenario\": \"1) System has two allowed outputs with registered phantom tokens: tokenA->pA and tokenB->pB.\\n2) Attacker (credit account owner via CreditFacade) calls redeemRequest(tokenB, X), creating pending redemption in tokenB (pB balance > 0).\\n3) Once withdrawable, attacker calls withdrawPhantomToken(pA, amount).\\n4) Adapter passes the only check (pA is registered) and calls gateway.withdraw(amount).\\n5) Gateway withdraws tokenB (the actual pending redemption asset), while the integration call context indicates phantom token pA/tokenA, causing the system to mis-associate the withdrawal with the wrong underlying and potentially leaving tokenB received in the account unexpectedly/unaccounted.\",\n      \"suggested_fix\": \"Bind withdrawals to the phantom token\u2019s expected underlying:\\n- In withdrawPhantomToken():\\n  - `address tokenOut = phantomTokenToOutputToken[token];`\\n  - validate `IMidasRedemptionVaultGateway(gateway).pendingTokenOutAmount(_creditAccount(), tokenOut) >= amount` (and/or ensure the gateway\u2019s withdraw logic is for that tokenOut).\\n  - additionally validate the phantom token itself: via `IPhantomToken(token).getPhantomTokenInfo()` require returned gateway == `gateway` and underlying == `tokenOut`.\\n- In setTokenAllowedStatusBatch(): when setting `config.phantomToken`, enforce that the phantom token\u2019s immutable `tokenOut` (underlying) equals `config.token` (and gateway matches), preventing mismatched configurations.\"\n    }\n  ],\n  \"overall_explanation\": \"The adapter\u2019s withdrawPhantomToken() does not ensure that the phantom token provided by the caller corresponds to the actual redeemable output token being withdrawn from the gateway. Because gateway.withdraw() is not parameterized by tokenOut, a caller can pass any registered phantom token while withdrawing a different underlying, creating a real asset/phantom mismatch that can break correct accounting and risk assumptions. Other reviewed functions largely rely on configurator-controlled allowlists and standard external call patterns.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": true,
+    "context_file_count": 1,
+    "has_protocol_doc": false
+  },
+  "api_metrics": {
+    "input_tokens": 3552,
+    "output_tokens": 5245,
+    "latency_ms": 83966.06731414795
+  }
+}

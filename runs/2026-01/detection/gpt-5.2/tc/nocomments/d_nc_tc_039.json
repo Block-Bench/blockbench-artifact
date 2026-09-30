@@ -1,0 +1,60 @@
+{
+  "sample_id": "nc_tc_039",
+  "variant": "nocomments",
+  "model": "gpt-5.2",
+  "prompt_type": "direct",
+  "timestamp": "2026-01-05T02:57:20.841493+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "access_control",
+    "vulnerable_function": "createLockedCampaign",
+    "vulnerable_lines": [
+      64
+    ],
+    "severity": "critical"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.86,
+    "vulnerabilities": [
+      {
+        "type": "Unauthorized campaign creation / campaign ID squatting (DoS)",
+        "severity": "medium",
+        "vulnerable_lines": [
+          57,
+          58,
+          60
+        ],
+        "location": "createLockedCampaign",
+        "explanation": "The contract allows any caller to create a campaign for any `id` and write arbitrary `campaign.manager` into storage without verifying that the creator is the manager (or otherwise authorized). Because `createLockedCampaign` only checks `campaigns[id].manager == address(0)` and then sets `campaigns[id] = campaign`, an attacker can preemptively create campaigns for popular/known IDs and permanently block legitimate creators (until the attacker chooses to cancel). This is an exploitable denial-of-service against campaign creation.",
+        "attack_scenario": "1) Attacker observes (or guesses) a campaign `id` that a legitimate party will use (e.g., announced off-chain or visible in mempool).\n2) Attacker calls `createLockedCampaign(id, campaign, ...)` first, setting `campaign.manager = attacker`.\n3) Legitimate party\u2019s later transaction reverts at `require(campaigns[id].manager == address(0), \"Campaign exists\")`.\n4) Attacker can keep the campaign entry indefinitely (never calling `cancelCampaign`), effectively preventing the legitimate campaign from ever being created under that ID.",
+        "suggested_fix": "Enforce that only the manager can create the campaign and/or bind the manager to the caller:\n- Add `require(campaign.manager == msg.sender, \"manager must be caller\")`.\n- Also require `campaign.manager != address(0)`.\nOptionally, derive manager from `msg.sender` instead of trusting the input struct: `campaign.manager = msg.sender;` before storing."
+      },
+      {
+        "type": "Reentrancy/state manipulation via arbitrary external call after state write",
+        "severity": "medium",
+        "vulnerable_lines": [
+          60,
+          64,
+          65,
+          76
+        ],
+        "location": "createLockedCampaign (external call to donation.tokenLocker)",
+        "explanation": "The function writes campaign state (`campaigns[id] = campaign`) and then performs a low-level call to an attacker-controlled address (`donation.tokenLocker.call(...)`). This enables reentrancy while the campaign entry is already set. A malicious `tokenLocker` (chosen by the caller) can reenter and call `cancelCampaign(id)` (if the attacker set `campaign.manager` to the locker contract address) and then re-create the same `id` with different parameters within the same transaction, ending with a campaign state different from what the outer call appears to have created. The use of low-level `call` also only checks a boolean success flag and cannot ensure the intended lock was actually created.",
+        "attack_scenario": "1) Attacker deploys `EvilLocker` contract with a `createTokenLock(...)` function that reenters.\n2) Attacker calls `createLockedCampaign(id, campaign{manager=EvilLocker}, claimLockup, donation{tokenLocker=EvilLocker, amount>0,...})`.\n3) `TokenClaimCampaigns` stores `campaigns[id]=campaign` and calls `EvilLocker.createTokenLock`.\n4) Inside `createTokenLock`, `EvilLocker` calls `cancelCampaign(id)` (passes because manager == EvilLocker), deleting the campaign, then reenters `createLockedCampaign` to set different campaign data for the same `id`.\n5) `EvilLocker` returns success; outer `createLockedCampaign` completes. Final stored campaign can be attacker-chosen and inconsistent with the apparent original creation / expected lock behavior.",
+        "suggested_fix": "Apply checks-effects-interactions and/or reentrancy protection:\n- Move the external interaction before committing state, or commit state only after the external call succeeds.\n- Add a `nonReentrant` guard to `createLockedCampaign` and `cancelCampaign`.\n- Avoid arbitrary low-level calls: use a typed interface for a trusted `tokenLocker` and validate it (allowlist), and/or verify expected post-conditions (e.g., lock ID/event/returned value) rather than only `success`."
+      }
+    ],
+    "overall_explanation": "The contract is vulnerable to (1) campaign ID squatting/DoS because anyone can create a campaign entry for any ID without proving they are the manager, and (2) reentrancy/state manipulation because it stores campaign state and then performs an arbitrary low-level external call to a user-supplied address. Both issues allow concrete, permissionless attacks that manipulate or block campaign state."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.86,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Unauthorized campaign creation / campaign ID squatting (DoS)\",\n      \"severity\": \"medium\",\n      \"vulnerable_lines\": [57, 58, 60],\n      \"location\": \"createLockedCampaign\",\n      \"explanation\": \"The contract allows any caller to create a campaign for any `id` and write arbitrary `campaign.manager` into storage without verifying that the creator is the manager (or otherwise authorized). Because `createLockedCampaign` only checks `campaigns[id].manager == address(0)` and then sets `campaigns[id] = campaign`, an attacker can preemptively create campaigns for popular/known IDs and permanently block legitimate creators (until the attacker chooses to cancel). This is an exploitable denial-of-service against campaign creation.\",\n      \"attack_scenario\": \"1) Attacker observes (or guesses) a campaign `id` that a legitimate party will use (e.g., announced off-chain or visible in mempool).\\n2) Attacker calls `createLockedCampaign(id, campaign, ...)` first, setting `campaign.manager = attacker`.\\n3) Legitimate party\u2019s later transaction reverts at `require(campaigns[id].manager == address(0), \\\"Campaign exists\\\")`.\\n4) Attacker can keep the campaign entry indefinitely (never calling `cancelCampaign`), effectively preventing the legitimate campaign from ever being created under that ID.\",\n      \"suggested_fix\": \"Enforce that only the manager can create the campaign and/or bind the manager to the caller:\\n- Add `require(campaign.manager == msg.sender, \\\"manager must be caller\\\")`.\\n- Also require `campaign.manager != address(0)`.\\nOptionally, derive manager from `msg.sender` instead of trusting the input struct: `campaign.manager = msg.sender;` before storing.\"\n    },\n    {\n      \"type\": \"Reentrancy/state manipulation via arbitrary external call after state write\",\n      \"severity\": \"medium\",\n      \"vulnerable_lines\": [60, 64, 65, 76],\n      \"location\": \"createLockedCampaign (external call to donation.tokenLocker)\",\n      \"explanation\": \"The function writes campaign state (`campaigns[id] = campaign`) and then performs a low-level call to an attacker-controlled address (`donation.tokenLocker.call(...)`). This enables reentrancy while the campaign entry is already set. A malicious `tokenLocker` (chosen by the caller) can reenter and call `cancelCampaign(id)` (if the attacker set `campaign.manager` to the locker contract address) and then re-create the same `id` with different parameters within the same transaction, ending with a campaign state different from what the outer call appears to have created. The use of low-level `call` also only checks a boolean success flag and cannot ensure the intended lock was actually created.\",\n      \"attack_scenario\": \"1) Attacker deploys `EvilLocker` contract with a `createTokenLock(...)` function that reenters.\\n2) Attacker calls `createLockedCampaign(id, campaign{manager=EvilLocker}, claimLockup, donation{tokenLocker=EvilLocker, amount>0,...})`.\\n3) `TokenClaimCampaigns` stores `campaigns[id]=campaign` and calls `EvilLocker.createTokenLock`.\\n4) Inside `createTokenLock`, `EvilLocker` calls `cancelCampaign(id)` (passes because manager == EvilLocker), deleting the campaign, then reenters `createLockedCampaign` to set different campaign data for the same `id`.\\n5) `EvilLocker` returns success; outer `createLockedCampaign` completes. Final stored campaign can be attacker-chosen and inconsistent with the apparent original creation / expected lock behavior.\",\n      \"suggested_fix\": \"Apply checks-effects-interactions and/or reentrancy protection:\\n- Move the external interaction before committing state, or commit state only after the external call succeeds.\\n- Add a `nonReentrant` guard to `createLockedCampaign` and `cancelCampaign`.\\n- Avoid arbitrary low-level calls: use a typed interface for a trusted `tokenLocker` and validate it (allowlist), and/or verify expected post-conditions (e.g., lock ID/event/returned value) rather than only `success`.\"\n    }\n  ],\n  \"overall_explanation\": \"The contract is vulnerable to (1) campaign ID squatting/DoS because anyone can create a campaign entry for any ID without proving they are the manager, and (2) reentrancy/state manipulation because it stores campaign state and then performs an arbitrary low-level external call to a user-supplied address. Both issues allow concrete, permissionless attacks that manipulate or block campaign state.\"\n}\n```"
+  },
+  "api_metrics": {
+    "input_tokens": 1707,
+    "output_tokens": 2187,
+    "latency_ms": 62371.50597572327
+  }
+}

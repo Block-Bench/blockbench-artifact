@@ -1,0 +1,69 @@
+{
+  "sample_id": "gs_028",
+  "dataset": "gs",
+  "prompt_type": "context_protocol",
+  "model": "claude-opus-4-5",
+  "timestamp": "2026-01-05T13:53:06.707120+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "access_control",
+    "vulnerable_functions": [
+      "recover"
+    ],
+    "severity": "high",
+    "description": "When a wallet is behind a checkpointer and a chained signature is used with bit 6 (checkpointer usage flag) set to zero, BaseSig.recover skips the checkpointer validation block (BaseSig.sol:88-106). This leaves _checkpointer and snapshot unset (zero-valued). In recoverChained, the checkpointer is ignored, and the signature validation passes even if the checkpointer should be enforced. The final validation succeeds because snapshot.imageHash == bytes32(0) as the checkpointer is ignored.",
+    "root_cause": "When a wallet is behind a checkpointer and a chained signature is used with bit 6 (checkpointer usage flag) set to zero, BaseSig.recover skips the checkpointer validation block (BaseSig.sol:88-106). This leaves _checkpointer and snapshot unset (zero-valued). In recoverChained, the checkpointer is ignored, and the signature validation passes even if the checkpointer should be enforced. The final validation succeeds because snapshot.imageHash == bytes32(0) as the checkpointer is ignored.",
+    "attack_scenario": "An evicted signer can sign a payload valid under stale wallet configuration and bypass checkpointer validation. PoC: Add test case to BaseSigTest and run forge test --match-test test_PoC_checkpointer_bypass. The test constructs a chained signature with checkpointer disabled, mocks the checkpointer response, and asserts successful recovery with correct image hash.",
+    "fix_description": "Do not permit checkpointer to be disabled (bit 6 unset) if chained signature is used. Revert in this case with custom error. Example fix in BaseSig.sol:\nif (signatureFlag & 0x40 == 0) {\n    revert MissingCheckpointer();\n}",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.85,
+    "vulnerabilities": [
+      {
+        "type": "Signature Malleability / Missing Zero Address Check",
+        "severity": "high",
+        "vulnerable_function": "recoverBranch",
+        "location": "BaseSig.recoverBranch - FLAG_SIGNATURE_HASH and FLAG_SIGNATURE_ETH_SIGN handlers",
+        "explanation": "When ecrecover fails (due to invalid signature parameters), it returns address(0) instead of reverting. The code does not check if the recovered address is address(0) before using it to compute the merkle leaf and adding weight. This means an attacker can craft signatures that recover to address(0), and if address(0) is part of the wallet's configuration tree (or can be made part of it), the attacker gains unauthorized signing weight.",
+        "attack_scenario": "1. Attacker identifies a wallet configuration that includes address(0) as a signer (either intentionally or through a configuration error). 2. Attacker crafts a signature with invalid parameters (e.g., s > secp256k1n/2, or v not in {27,28}) that causes ecrecover to return address(0). 3. The signature is processed, weight is added for address(0), and the merkle root is computed including this leaf. 4. If the weight threshold is met, the attacker can execute unauthorized transactions without controlling any actual private key.",
+        "suggested_fix": "Add a check after ecrecover to ensure the recovered address is not address(0): `address addr = ecrecover(_opHash, v, r, s); require(addr != address(0), 'Invalid signature');`"
+      },
+      {
+        "type": "Unchecked External Call Return Value",
+        "severity": "medium",
+        "vulnerable_function": "recoverBranch",
+        "location": "BaseSig.recoverBranch - FLAG_SIGNATURE_SAPIENT and FLAG_SIGNATURE_SAPIENT_COMPACT handlers",
+        "explanation": "The ISapient and ISapientCompact external calls return a bytes32 imageHash that is directly used in the merkle tree computation without validation. If the external contract returns bytes32(0) or an unexpected value (due to a bug, malicious implementation, or if the contract doesn't exist), the signature validation may produce incorrect results. Unlike ERC1271 which has an explicit magic value check, Sapient signatures have no validation of the returned imageHash.",
+        "attack_scenario": "1. Attacker deploys a malicious contract at an address that is configured as a Sapient signer in the wallet. 2. The malicious contract's recoverSapientSignature function returns a predictable imageHash regardless of the actual signature validity. 3. Attacker can forge signatures that appear valid because the merkle tree computation uses the attacker-controlled imageHash. 4. This allows unauthorized transactions if the attacker can predict or control what imageHash value would make the overall signature valid.",
+        "suggested_fix": "Add validation that the returned sapientImageHash is not bytes32(0), and consider implementing additional checks similar to ERC1271's magic value pattern to ensure the Sapient contract explicitly confirms signature validity."
+      },
+      {
+        "type": "Potential Integer Overflow in Weight Accumulation",
+        "severity": "medium",
+        "vulnerable_function": "recoverBranch",
+        "location": "BaseSig.recoverBranch - unchecked block",
+        "explanation": "The entire recoverBranch function operates within an unchecked block, and weight is accumulated using `weight += addrWeight`. While individual weights are uint8 (max 255), the accumulated weight is uint256. In deeply nested or complex signature trees with many signers, repeated additions could theoretically overflow, though this would require an extremely large number of signers. More concerning is that the unchecked block also affects the rindex calculations, which could lead to out-of-bounds reads if signature data is malformed.",
+        "attack_scenario": "1. Attacker crafts a malformed signature with incorrect size fields that cause rindex to overflow or wrap around. 2. Due to the unchecked block, arithmetic operations on rindex don't revert on overflow. 3. This could cause the function to read from unexpected memory locations or skip validation steps. 4. The attacker might be able to construct a signature that passes validation despite being invalid.",
+        "suggested_fix": "Move critical index arithmetic (rindex calculations) outside the unchecked block, or add explicit bounds checks before each signature.readX operation to ensure rindex + read_size <= signature.length."
+      }
+    ],
+    "overall_explanation": "The BaseSig library contains several security concerns in its signature recovery logic. The most critical issue is the missing zero-address check after ecrecover calls, which could allow signature forgery if address(0) is part of the wallet configuration. The Sapient signature handlers lack proper validation of returned imageHash values, potentially allowing malicious external contracts to manipulate signature validation. Additionally, the extensive use of unchecked arithmetic in recoverBranch, while gas-efficient, creates risks around index manipulation with malformed signatures. The contract's complexity and support for multiple signature types increases the attack surface. The context file (UnstakeRequestsManager) appears unrelated to the main contract's functionality and doesn't introduce additional vulnerabilities to BaseSig."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.85,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Signature Malleability / Missing Zero Address Check\",\n      \"severity\": \"high\",\n      \"vulnerable_function\": \"recoverBranch\",\n      \"location\": \"BaseSig.recoverBranch - FLAG_SIGNATURE_HASH and FLAG_SIGNATURE_ETH_SIGN handlers\",\n      \"explanation\": \"When ecrecover fails (due to invalid signature parameters), it returns address(0) instead of reverting. The code does not check if the recovered address is address(0) before using it to compute the merkle leaf and adding weight. This means an attacker can craft signatures that recover to address(0), and if address(0) is part of the wallet's configuration tree (or can be made part of it), the attacker gains unauthorized signing weight.\",\n      \"attack_scenario\": \"1. Attacker identifies a wallet configuration that includes address(0) as a signer (either intentionally or through a configuration error). 2. Attacker crafts a signature with invalid parameters (e.g., s > secp256k1n/2, or v not in {27,28}) that causes ecrecover to return address(0). 3. The signature is processed, weight is added for address(0), and the merkle root is computed including this leaf. 4. If the weight threshold is met, the attacker can execute unauthorized transactions without controlling any actual private key.\",\n      \"suggested_fix\": \"Add a check after ecrecover to ensure the recovered address is not address(0): `address addr = ecrecover(_opHash, v, r, s); require(addr != address(0), 'Invalid signature');`\"\n    },\n    {\n      \"type\": \"Unchecked External Call Return Value\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"recoverBranch\",\n      \"location\": \"BaseSig.recoverBranch - FLAG_SIGNATURE_SAPIENT and FLAG_SIGNATURE_SAPIENT_COMPACT handlers\",\n      \"explanation\": \"The ISapient and ISapientCompact external calls return a bytes32 imageHash that is directly used in the merkle tree computation without validation. If the external contract returns bytes32(0) or an unexpected value (due to a bug, malicious implementation, or if the contract doesn't exist), the signature validation may produce incorrect results. Unlike ERC1271 which has an explicit magic value check, Sapient signatures have no validation of the returned imageHash.\",\n      \"attack_scenario\": \"1. Attacker deploys a malicious contract at an address that is configured as a Sapient signer in the wallet. 2. The malicious contract's recoverSapientSignature function returns a predictable imageHash regardless of the actual signature validity. 3. Attacker can forge signatures that appear valid because the merkle tree computation uses the attacker-controlled imageHash. 4. This allows unauthorized transactions if the attacker can predict or control what imageHash value would make the overall signature valid.\",\n      \"suggested_fix\": \"Add validation that the returned sapientImageHash is not bytes32(0), and consider implementing additional checks similar to ERC1271's magic value pattern to ensure the Sapient contract explicitly confirms signature validity.\"\n    },\n    {\n      \"type\": \"Potential Integer Overflow in Weight Accumulation\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"recoverBranch\",\n      \"location\": \"BaseSig.recoverBranch - unchecked block\",\n      \"explanation\": \"The entire recoverBranch function operates within an unchecked block, and weight is accumulated using `weight += addrWeight`. While individual weights are uint8 (max 255), the accumulated weight is uint256. In deeply nested or complex signature trees with many signers, repeated additions could theoretically overflow, though this would require an extremely large number of signers. More concerning is that the unchecked block also affects the rindex calculations, which could lead to out-of-bounds reads if signature data is malformed.\",\n      \"attack_scenario\": \"1. Attacker crafts a malformed signature with incorrect size fields that cause rindex to overflow or wrap around. 2. Due to the unchecked block, arithmetic operations on rindex don't revert on overflow. 3. This could cause the function to read from unexpected memory locations or skip validation steps. 4. The attacker might be able to construct a signature that passes validation despite being invalid.\",\n      \"suggested_fix\": \"Move critical index arithmetic (rindex calculations) outside the unchecked block, or add explicit bounds checks before each signature.readX operation to ensure rindex + read_size <= signature.length.\"\n    }\n  ],\n  \"overall_explanation\": \"The BaseSig library contains several security concerns in its signature recovery logic. The most critical issue is the missing zero-address check after ecrecover calls, which could allow signature forgery if address(0) is part of the wallet configuration. The Sapient signature handlers lack proper validation of returned imageHash values, potentially allowing malicious external contracts to manipulate signature validation. Additionally, the extensive use of unchecked arithmetic in recoverBranch, while gas-efficient, creates risks around index manipulation with malformed signatures. The contract's complexity and support for multiple signature types increases the attack surface. The context file (UnstakeRequestsManager) appears unrelated to the main contract's functionality and doesn't introduce additional vulnerabilities to BaseSig.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": true,
+    "context_file_count": 1,
+    "has_protocol_doc": true
+  },
+  "api_metrics": {
+    "input_tokens": 8931,
+    "output_tokens": 1264,
+    "latency_ms": 24397.675037384033
+  }
+}

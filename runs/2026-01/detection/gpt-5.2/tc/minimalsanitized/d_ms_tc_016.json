@@ -1,0 +1,67 @@
+{
+  "sample_id": "ms_tc_016",
+  "variant": "minimalsanitized",
+  "model": "gpt-5.2",
+  "prompt_type": "direct",
+  "timestamp": "2026-01-04T22:43:15.949267+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "validation_bypass",
+    "vulnerable_function": "deposit",
+    "vulnerable_lines": [
+      67
+    ],
+    "severity": null
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.9,
+    "vulnerabilities": [
+      {
+        "type": "Missing access control (arbitrary resourceID -> token mapping)",
+        "severity": "critical",
+        "vulnerable_lines": [
+          76,
+          77
+        ],
+        "location": "QBridgeHandler.setResource",
+        "explanation": "setResource() is externally callable by anyone and directly overwrites resourceIDToTokenContractAddress. This lets an attacker remap any resourceID that the bridge system/off-chain relayers consider valid to an attacker-chosen token contract. If the bridge mints/unlocks assets on the destination chain based on QBridge.Deposit events, an attacker can point the resourceID to a malicious/non-standard ERC20 that lies about transfers (or always returns true/false), enabling deposits to be accepted without actually locking real tokens, resulting in unbacked minting on the destination chain.",
+        "attack_scenario": "1) Attacker calls setResource(resourceIDUsedByBridge, attackerToken).\n2) AttackerToken implements transferFrom to return true without transferring (or returns false and the handler ignores it).\n3) Attacker calls QBridge.deposit(destinationDomainID, resourceIDUsedByBridge, abi.encode(fakeAmount)).\n4) QBridgeHandler.deposit calls attackerToken.transferFrom, which does not lock funds.\n5) QBridge emits Deposit; off-chain bridge logic mints/unlocks assets on the destination chain to the attacker as if funds were locked.",
+        "suggested_fix": "Restrict setResource to a trusted role (e.g., Ownable/AccessControl) and/or hardcode an immutable bridge admin. Add a resource whitelist and require resourceID to be pre-registered and immutable or only updatable via timelock/governance. Also validate tokenAddress is a contract and matches an expected/approved token."
+      },
+      {
+        "type": "Unchecked ERC20 transferFrom return value (deposit can succeed without locking funds)",
+        "severity": "high",
+        "vulnerable_lines": [
+          67
+        ],
+        "location": "QBridgeHandler.deposit",
+        "explanation": "IERC20(tokenContract).transferFrom(...) is called and its boolean return value is ignored. For ERC20 tokens that return false instead of reverting on failure (or malicious tokens that return true without transferring), QBridgeHandler.deposit will still complete successfully. Since QBridge emits the Deposit event after handler.deposit returns, the system can record a successful deposit even when no tokens were transferred to the handler, enabling unbacked bridging/minting if the off-chain/other-chain logic trusts the event.",
+        "attack_scenario": "1) Ensure the resourceID maps to a token that returns false on failed transferFrom (or a malicious token that lies about transfers). This may be possible directly via the unprotected setResource.\n2) Call QBridge.deposit with a large amount but without providing a real transferable balance/allowance (or with a lying token).\n3) transferFrom returns false (or returns true but moves nothing), but the handler does not revert.\n4) QBridge emits Deposit; bridge relayers mint/unlock assets on destination chain despite no lock on source.",
+        "suggested_fix": "Use SafeERC20 (OpenZeppelin) and require success: SafeERC20.safeTransferFrom(token, depositer, address(this), amount). Alternatively, explicitly check `require(IERC20(tokenContract).transferFrom(...), \"TRANSFER_FAILED\")` and only support well-behaved tokens; also consider balance-delta checks for fee-on-transfer/non-standard tokens."
+      },
+      {
+        "type": "Unrestricted handler deposit allows third-party forced transfers from approved users (griefing/loss)",
+        "severity": "medium",
+        "vulnerable_lines": [
+          56
+        ],
+        "location": "QBridgeHandler.deposit",
+        "explanation": "QBridgeHandler.deposit is publicly callable by any address and accepts an arbitrary `depositer` parameter. If a user has granted an allowance to the handler (typical for bridges), any attacker can call deposit(resourceID, victim, data) to transfer the victim\u2019s tokens into the handler contract without the victim initiating a bridge deposit. This is an unauthorized token movement that can lock user funds in the handler (no withdrawal function shown here), causing loss/griefing.",
+        "attack_scenario": "1) Victim approves QBridgeHandler to spend N tokens for legitimate bridge usage.\n2) Attacker observes/knows the approval.\n3) Attacker calls QBridgeHandler.deposit(resourceID, victim, abi.encode(N)).\n4) Handler calls transferFrom(victim, handler, N) and pulls tokens into the handler contract.\n5) Victim\u2019s tokens are moved/locked without a corresponding QBridge.Deposit event, potentially making recovery impossible.",
+        "suggested_fix": "Restrict QBridgeHandler.deposit so only the QBridge contract (or a trusted router) can call it: `require(msg.sender == bridge, \"NOT_BRIDGE\")`. Also remove the arbitrary `depositer` parameter and derive it from the trusted caller context, or authenticate deposit intent via signatures."
+      }
+    ],
+    "overall_explanation": "The core issue is missing authorization around critical bridge configuration and flows. Anyone can remap resourceIDs to arbitrary token contracts (LN-76-77), enabling malicious tokens to be used for deposits. Combined with the unchecked transferFrom return value (LN-67), deposits can appear successful (and trigger Deposit events) without actually locking funds, leading to unbacked minting/unlocking on destination chains that trust these events. Additionally, the handler\u2019s deposit function is callable by anyone and allows specifying any depositer (LN-56), enabling forced transfers from users who approved the handler, causing unauthorized locking/loss."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.9,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Missing access control (arbitrary resourceID -> token mapping)\",\n      \"severity\": \"critical\",\n      \"vulnerable_lines\": [76, 77],\n      \"location\": \"QBridgeHandler.setResource\",\n      \"explanation\": \"setResource() is externally callable by anyone and directly overwrites resourceIDToTokenContractAddress. This lets an attacker remap any resourceID that the bridge system/off-chain relayers consider valid to an attacker-chosen token contract. If the bridge mints/unlocks assets on the destination chain based on QBridge.Deposit events, an attacker can point the resourceID to a malicious/non-standard ERC20 that lies about transfers (or always returns true/false), enabling deposits to be accepted without actually locking real tokens, resulting in unbacked minting on the destination chain.\",\n      \"attack_scenario\": \"1) Attacker calls setResource(resourceIDUsedByBridge, attackerToken).\\n2) AttackerToken implements transferFrom to return true without transferring (or returns false and the handler ignores it).\\n3) Attacker calls QBridge.deposit(destinationDomainID, resourceIDUsedByBridge, abi.encode(fakeAmount)).\\n4) QBridgeHandler.deposit calls attackerToken.transferFrom, which does not lock funds.\\n5) QBridge emits Deposit; off-chain bridge logic mints/unlocks assets on the destination chain to the attacker as if funds were locked.\",\n      \"suggested_fix\": \"Restrict setResource to a trusted role (e.g., Ownable/AccessControl) and/or hardcode an immutable bridge admin. Add a resource whitelist and require resourceID to be pre-registered and immutable or only updatable via timelock/governance. Also validate tokenAddress is a contract and matches an expected/approved token.\"\n    },\n    {\n      \"type\": \"Unchecked ERC20 transferFrom return value (deposit can succeed without locking funds)\",\n      \"severity\": \"high\",\n      \"vulnerable_lines\": [67],\n      \"location\": \"QBridgeHandler.deposit\",\n      \"explanation\": \"IERC20(tokenContract).transferFrom(...) is called and its boolean return value is ignored. For ERC20 tokens that return false instead of reverting on failure (or malicious tokens that return true without transferring), QBridgeHandler.deposit will still complete successfully. Since QBridge emits the Deposit event after handler.deposit returns, the system can record a successful deposit even when no tokens were transferred to the handler, enabling unbacked bridging/minting if the off-chain/other-chain logic trusts the event.\",\n      \"attack_scenario\": \"1) Ensure the resourceID maps to a token that returns false on failed transferFrom (or a malicious token that lies about transfers). This may be possible directly via the unprotected setResource.\\n2) Call QBridge.deposit with a large amount but without providing a real transferable balance/allowance (or with a lying token).\\n3) transferFrom returns false (or returns true but moves nothing), but the handler does not revert.\\n4) QBridge emits Deposit; bridge relayers mint/unlock assets on destination chain despite no lock on source.\",\n      \"suggested_fix\": \"Use SafeERC20 (OpenZeppelin) and require success: SafeERC20.safeTransferFrom(token, depositer, address(this), amount). Alternatively, explicitly check `require(IERC20(tokenContract).transferFrom(...), \\\"TRANSFER_FAILED\\\")` and only support well-behaved tokens; also consider balance-delta checks for fee-on-transfer/non-standard tokens.\"\n    },\n    {\n      \"type\": \"Unrestricted handler deposit allows third-party forced transfers from approved users (griefing/loss)\",\n      \"severity\": \"medium\",\n      \"vulnerable_lines\": [56],\n      \"location\": \"QBridgeHandler.deposit\",\n      \"explanation\": \"QBridgeHandler.deposit is publicly callable by any address and accepts an arbitrary `depositer` parameter. If a user has granted an allowance to the handler (typical for bridges), any attacker can call deposit(resourceID, victim, data) to transfer the victim\u2019s tokens into the handler contract without the victim initiating a bridge deposit. This is an unauthorized token movement that can lock user funds in the handler (no withdrawal function shown here), causing loss/griefing.\",\n      \"attack_scenario\": \"1) Victim approves QBridgeHandler to spend N tokens for legitimate bridge usage.\\n2) Attacker observes/knows the approval.\\n3) Attacker calls QBridgeHandler.deposit(resourceID, victim, abi.encode(N)).\\n4) Handler calls transferFrom(victim, handler, N) and pulls tokens into the handler contract.\\n5) Victim\u2019s tokens are moved/locked without a corresponding QBridge.Deposit event, potentially making recovery impossible.\",\n      \"suggested_fix\": \"Restrict QBridgeHandler.deposit so only the QBridge contract (or a trusted router) can call it: `require(msg.sender == bridge, \\\"NOT_BRIDGE\\\")`. Also remove the arbitrary `depositer` parameter and derive it from the trusted caller context, or authenticate deposit intent via signatures.\"\n    }\n  ],\n  \"overall_explanation\": \"The core issue is missing authorization around critical bridge configuration and flows. Anyone can remap resourceIDs to arbitrary token contracts (LN-76-77), enabling malicious tokens to be used for deposits. Combined with the unchecked transferFrom return value (LN-67), deposits can appear successful (and trigger Deposit events) without actually locking funds, leading to unbacked minting/unlocking on destination chains that trust these events. Additionally, the handler\u2019s deposit function is callable by anyone and allows specifying any depositer (LN-56), enabling forced transfers from users who approved the handler, causing unauthorized locking/loss.\"\n}"
+  },
+  "api_metrics": {
+    "input_tokens": 1655,
+    "output_tokens": 2460,
+    "latency_ms": 62951.377868652344
+  }
+}

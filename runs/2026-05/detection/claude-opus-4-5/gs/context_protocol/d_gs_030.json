@@ -1,0 +1,69 @@
+{
+  "sample_id": "gs_030",
+  "dataset": "gs",
+  "prompt_type": "context_protocol",
+  "model": "claude-opus-4-5",
+  "timestamp": "2026-05-25T13:38:49.386900+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "signature_replay",
+    "vulnerable_functions": [
+      "hashCallWithReplayProtection"
+    ],
+    "severity": "medium",
+    "description": "SessionSig.hashCallWithReplayProtection omits wallet address in hash, allowing signatures for one wallet to replay on another with same config and nonce. SessionManager.recoverSapientSignature and BaseAuth.signatureValidation do not bind to msg.sender.",
+    "root_cause": "SessionSig.hashCallWithReplayProtection omits wallet address in hash, allowing signatures for one wallet to replay on another with same config and nonce. SessionManager.recoverSapientSignature and BaseAuth.signatureValidation do not bind to msg.sender.",
+    "attack_scenario": "Sign payload for Wallet A, replay on Wallet B (same config, nonce). Drains both wallets. PoC: test/extensions/sessions/SessionReplay.t.sol, run forge test --match-test test_crossWalletSessionReplayDrainsSiblingWallet -vv. Logs show attacker draining two wallets.",
+    "fix_description": "Include address(this) in hashCallWithReplayProtection. Update SDK to hash (wallet, chainId, space, nonce, callIdx, call details).",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.85,
+    "vulnerabilities": [
+      {
+        "type": "Array Index Out of Bounds",
+        "severity": "medium",
+        "vulnerable_function": "recoverConfiguration",
+        "location": "SessionSig.recoverConfiguration",
+        "explanation": "When processing branch permissions, the code copies all permissions from branchSig.sessionPermissions to sig.sessionPermissions without checking if there's enough space. The initial allocation is based on `encoded.length / MIN_ENCODED_PERMISSION_SIZE`, but when branches are processed recursively, each branch also allocates its own array based on its own encoded length. The parent's array size estimation doesn't account for permissions that will be extracted from nested branches, potentially causing writes beyond the allocated array bounds.",
+        "attack_scenario": "1. Craft an encoded configuration where the top-level encoded data is small (resulting in small maxPermissionsSize allocation). 2. Include a branch that contains many permission entries. 3. When the branch is processed, branchSig.sessionPermissions will contain multiple entries. 4. The loop `for (uint256 i = 0; i < branchSig.sessionPermissions.length; i++)` will attempt to write to `sig.sessionPermissions[permissionsCount++]` beyond the allocated array size. 5. This causes memory corruption, potentially overwriting other memory structures.",
+        "suggested_fix": "Either pre-calculate the exact number of permissions needed by scanning the entire encoded data first, or use a dynamic array approach. Alternatively, add bounds checking before writing: `require(permissionsCount < sig.sessionPermissions.length, 'Permissions overflow');`"
+      },
+      {
+        "type": "Blacklist Sorting Bypass",
+        "severity": "medium",
+        "vulnerable_function": "recoverConfiguration",
+        "location": "SessionSig.recoverConfiguration - FLAG_BLACKLIST handling",
+        "explanation": "The blacklist sorting check `if (sig.implicitBlacklist[i] < previousAddress)` uses strict less-than comparison, allowing duplicate addresses in the blacklist. If the blacklist is used for binary search lookups elsewhere in the protocol, duplicates could cause unexpected behavior. Additionally, the check allows equal addresses (duplicates) which may not be the intended behavior for a blacklist.",
+        "attack_scenario": "1. Create a blacklist with duplicate addresses: [0x1111, 0x1111, 0x2222]. 2. The sorting check passes because each address is >= the previous one. 3. If the blacklist is used with binary search or set-based operations elsewhere, the duplicate entries could cause the blacklist check to behave incorrectly or be bypassed.",
+        "suggested_fix": "Change the comparison to `<=` to prevent duplicates: `if (sig.implicitBlacklist[i] <= previousAddress) { revert SessionErrors.InvalidBlacklistUnsorted(); }`"
+      },
+      {
+        "type": "Leaf Hash Collision",
+        "severity": "medium",
+        "vulnerable_function": "_leafHashForPermissions",
+        "location": "SessionSig._leafHashForPermissions",
+        "explanation": "The leaf hash for permissions includes the raw encoded bytes starting from after the flag byte (pointerStart), but the flag byte itself is prepended separately. However, the encoded data passed to _leafHashForPermissions does NOT include the first flag byte that was already consumed. This means the hash is computed over `FLAG_PERMISSIONS || encoded[pointerStart:pointer]` where pointerStart is AFTER the flag byte was read. The issue is that the first byte of the permissions data could potentially be crafted to create hash collisions with other node types if the encoding allows flexibility.",
+        "attack_scenario": "An attacker could potentially craft encoded data where the permissions encoding, when hashed with FLAG_PERMISSIONS prefix, produces the same hash as a different configuration structure. This could allow substituting one configuration for another while maintaining the same imageHash.",
+        "suggested_fix": "Ensure the leaf hash includes all relevant data in a canonical format that cannot collide with other node types. Consider including the full original encoded segment including the flag byte, or use domain separation with additional context."
+      }
+    ],
+    "overall_explanation": "The SessionSig library contains several vulnerabilities related to array bounds handling and data validation. The most significant issue is the potential array overflow when processing nested branches, where permissions from child branches are copied to the parent's array without proper bounds checking. The blacklist validation allows duplicate entries which could undermine security checks elsewhere. Additionally, there are potential hash collision concerns in the leaf hashing mechanism. The signature recovery logic itself appears sound, with proper validation of identity signers and session signers."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.85,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Array Index Out of Bounds\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"recoverConfiguration\",\n      \"location\": \"SessionSig.recoverConfiguration\",\n      \"explanation\": \"When processing branch permissions, the code copies all permissions from branchSig.sessionPermissions to sig.sessionPermissions without checking if there's enough space. The initial allocation is based on `encoded.length / MIN_ENCODED_PERMISSION_SIZE`, but when branches are processed recursively, each branch also allocates its own array based on its own encoded length. The parent's array size estimation doesn't account for permissions that will be extracted from nested branches, potentially causing writes beyond the allocated array bounds.\",\n      \"attack_scenario\": \"1. Craft an encoded configuration where the top-level encoded data is small (resulting in small maxPermissionsSize allocation). 2. Include a branch that contains many permission entries. 3. When the branch is processed, branchSig.sessionPermissions will contain multiple entries. 4. The loop `for (uint256 i = 0; i < branchSig.sessionPermissions.length; i++)` will attempt to write to `sig.sessionPermissions[permissionsCount++]` beyond the allocated array size. 5. This causes memory corruption, potentially overwriting other memory structures.\",\n      \"suggested_fix\": \"Either pre-calculate the exact number of permissions needed by scanning the entire encoded data first, or use a dynamic array approach. Alternatively, add bounds checking before writing: `require(permissionsCount < sig.sessionPermissions.length, 'Permissions overflow');`\"\n    },\n    {\n      \"type\": \"Blacklist Sorting Bypass\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"recoverConfiguration\",\n      \"location\": \"SessionSig.recoverConfiguration - FLAG_BLACKLIST handling\",\n      \"explanation\": \"The blacklist sorting check `if (sig.implicitBlacklist[i] < previousAddress)` uses strict less-than comparison, allowing duplicate addresses in the blacklist. If the blacklist is used for binary search lookups elsewhere in the protocol, duplicates could cause unexpected behavior. Additionally, the check allows equal addresses (duplicates) which may not be the intended behavior for a blacklist.\",\n      \"attack_scenario\": \"1. Create a blacklist with duplicate addresses: [0x1111, 0x1111, 0x2222]. 2. The sorting check passes because each address is >= the previous one. 3. If the blacklist is used with binary search or set-based operations elsewhere, the duplicate entries could cause the blacklist check to behave incorrectly or be bypassed.\",\n      \"suggested_fix\": \"Change the comparison to `<=` to prevent duplicates: `if (sig.implicitBlacklist[i] <= previousAddress) { revert SessionErrors.InvalidBlacklistUnsorted(); }`\"\n    },\n    {\n      \"type\": \"Leaf Hash Collision\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"_leafHashForPermissions\",\n      \"location\": \"SessionSig._leafHashForPermissions\",\n      \"explanation\": \"The leaf hash for permissions includes the raw encoded bytes starting from after the flag byte (pointerStart), but the flag byte itself is prepended separately. However, the encoded data passed to _leafHashForPermissions does NOT include the first flag byte that was already consumed. This means the hash is computed over `FLAG_PERMISSIONS || encoded[pointerStart:pointer]` where pointerStart is AFTER the flag byte was read. The issue is that the first byte of the permissions data could potentially be crafted to create hash collisions with other node types if the encoding allows flexibility.\",\n      \"attack_scenario\": \"An attacker could potentially craft encoded data where the permissions encoding, when hashed with FLAG_PERMISSIONS prefix, produces the same hash as a different configuration structure. This could allow substituting one configuration for another while maintaining the same imageHash.\",\n      \"suggested_fix\": \"Ensure the leaf hash includes all relevant data in a canonical format that cannot collide with other node types. Consider including the full original encoded segment including the flag byte, or use domain separation with additional context.\"\n    }\n  ],\n  \"overall_explanation\": \"The SessionSig library contains several vulnerabilities related to array bounds handling and data validation. The most significant issue is the potential array overflow when processing nested branches, where permissions from child branches are copied to the parent's array without proper bounds checking. The blacklist validation allows duplicate entries which could undermine security checks elsewhere. Additionally, there are potential hash collision concerns in the leaf hashing mechanism. The signature recovery logic itself appears sound, with proper validation of identity signers and session signers.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": true,
+    "context_file_count": 1,
+    "has_protocol_doc": false
+  },
+  "api_metrics": {
+    "input_tokens": 9389,
+    "output_tokens": 1104,
+    "latency_ms": 22846.83609008789
+  }
+}

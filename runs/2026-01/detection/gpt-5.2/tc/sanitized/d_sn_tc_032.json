@@ -1,0 +1,81 @@
+{
+  "sample_id": "sn_tc_032",
+  "variant": "sanitized",
+  "model": "gpt-5.2",
+  "prompt_type": "direct",
+  "timestamp": "2026-01-05T02:52:00.386879+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "arithmetic_error",
+    "vulnerable_function": "depositExactAmount",
+    "vulnerable_lines": [
+      68,
+      100
+    ],
+    "severity": "high"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.95,
+    "vulnerabilities": [
+      {
+        "type": "Unauthorized withdrawal / broken authorization on position ID",
+        "severity": "critical",
+        "vulnerable_lines": [
+          42,
+          43,
+          44,
+          45,
+          81,
+          86,
+          87,
+          99,
+          103,
+          111,
+          122,
+          123,
+          127,
+          131
+        ],
+        "location": "mintPosition(), withdrawExactShares(), withdrawExactAmount()",
+        "explanation": "Positions are keyed only by a raw `_nftId` in mappings, but there is no enforcement that `msg.sender` owns/controls that `_nftId`. `mintPosition()` (LN-42\u201345) does not mint an ERC721 nor records ownership, so IDs are not bound to any account. Both withdrawal functions only check that `userLendingShares[_nftId][_poolToken]` is sufficient (LN-86\u201389, LN-122\u2013125) and then transfer funds to `msg.sender` (LN-103, LN-131). As a result, anyone can withdraw using any `_nftId` that has shares, stealing other users\u2019 deposits.",
+        "attack_scenario": "1) Victim deposits token T using `_nftId = 1` via `depositExactAmount(1, T, amount)`, accruing `userLendingShares[1][T]`.\n2) Attacker reads victim\u2019s shares via `getPositionLendingShares(1, T)`.\n3) Attacker calls `withdrawExactShares(1, T, victimShares)` (or `withdrawExactAmount(1, T, withdrawAmount)`), passing the victim\u2019s `_nftId`.\n4) Contract transfers the corresponding tokens to the attacker (LN-103 / LN-131), reducing the victim\u2019s shares and pool totals.",
+        "suggested_fix": "Bind `_nftId` to an actual ERC721 position and enforce ownership on all state-changing functions that use `_nftId`.\n- In `mintPosition()` mint an NFT to `msg.sender` (e.g., via an internal ERC721 or an external `positionNFTs.mint`).\n- Add at the start of `depositExactAmount`, `withdrawExactShares`, and `withdrawExactAmount`:\n  `require(positionNFTs.ownerOf(_nftId) == msg.sender, \"Not position owner\");`\n- Alternatively, if not using ERC721, store `positionOwner[_nftId]` at mint and check it similarly."
+      },
+      {
+        "type": "Share accounting mismatch with fee-on-transfer / deflationary tokens enabling loss shifting",
+        "severity": "medium",
+        "vulnerable_lines": [
+          55,
+          61,
+          66,
+          67,
+          68,
+          72,
+          95,
+          96,
+          97,
+          118,
+          119,
+          120,
+          129
+        ],
+        "location": "depositExactAmount(), withdrawExactShares(), withdrawExactAmount()",
+        "explanation": "The pool uses `_amount` as the credited deposit and increases `pseudoTotalPool` by `_amount` (LN-72) without verifying how many tokens were actually received (LN-55). For fee-on-transfer/deflationary tokens, the contract may receive less than `_amount`, but it still mints shares as if the full amount arrived (LN-61\u201370). This creates an accounting deficit: later withdrawals compute amounts based on `pseudoTotalPool` and shares (LN-95\u201397, LN-118\u2013120), potentially allowing early depositors to withdraw more than the contract truly received, with the shortfall effectively paid by later depositors (or causing withdrawals to revert until others add liquidity).",
+        "attack_scenario": "Assume token T charges a 10% fee on `transferFrom(from, this, amount)` but no fee (or smaller fee) on `transfer(this, to, amount)`.\n1) Attacker deposits 1,000 T via `depositExactAmount(nftIdA, T, 1000)`; contract receives only 900 T, but `pseudoTotalPool` increases by 1,000 and attacker receives shares for 1,000.\n2) Honest users deposit later, adding real balance to the contract.\n3) Attacker withdraws based on their inflated shares (e.g., `withdrawExactAmount(..., 1000)`), receiving up to 1,000 T, where the extra 100 T comes from later users\u2019 deposits, effectively shifting the transfer fee loss onto them.",
+        "suggested_fix": "Use balance-delta accounting on deposit/withdraw:\n- Before `transferFrom`, record `balBefore = IERC20(_poolToken).balanceOf(address(this))`.\n- After `transferFrom`, record `balAfter` and set `received = balAfter - balBefore`.\n- Use `received` (not `_amount`) to compute `shareAmount` and to increment `pseudoTotalPool`.\nAdditionally, consider using OpenZeppelin `SafeERC20` and/or explicitly disallow fee-on-transfer tokens for pools."
+      }
+    ],
+    "overall_explanation": "The contract is critically unsafe because `_nftId` is treated as an authorization boundary, but there is no ownership binding or check; anyone can withdraw against any `_nftId` and steal funds. A secondary issue is incorrect pool accounting for fee-on-transfer tokens: deposits credit the requested amount rather than the received amount, enabling loss shifting to later depositors or causing insolvency/withdrawal failures. Fixes require enforcing position ownership (via ERC721 or stored owner mapping) and using balance-delta accounting (and SafeERC20) for ERC20 interactions."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.95,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Unauthorized withdrawal / broken authorization on position ID\",\n      \"severity\": \"critical\",\n      \"vulnerable_lines\": [42, 43, 44, 45, 81, 86, 87, 99, 103, 111, 122, 123, 127, 131],\n      \"location\": \"mintPosition(), withdrawExactShares(), withdrawExactAmount()\",\n      \"explanation\": \"Positions are keyed only by a raw `_nftId` in mappings, but there is no enforcement that `msg.sender` owns/controls that `_nftId`. `mintPosition()` (LN-42\u201345) does not mint an ERC721 nor records ownership, so IDs are not bound to any account. Both withdrawal functions only check that `userLendingShares[_nftId][_poolToken]` is sufficient (LN-86\u201389, LN-122\u2013125) and then transfer funds to `msg.sender` (LN-103, LN-131). As a result, anyone can withdraw using any `_nftId` that has shares, stealing other users\u2019 deposits.\",\n      \"attack_scenario\": \"1) Victim deposits token T using `_nftId = 1` via `depositExactAmount(1, T, amount)`, accruing `userLendingShares[1][T]`.\\n2) Attacker reads victim\u2019s shares via `getPositionLendingShares(1, T)`.\\n3) Attacker calls `withdrawExactShares(1, T, victimShares)` (or `withdrawExactAmount(1, T, withdrawAmount)`), passing the victim\u2019s `_nftId`.\\n4) Contract transfers the corresponding tokens to the attacker (LN-103 / LN-131), reducing the victim\u2019s shares and pool totals.\",\n      \"suggested_fix\": \"Bind `_nftId` to an actual ERC721 position and enforce ownership on all state-changing functions that use `_nftId`.\\n- In `mintPosition()` mint an NFT to `msg.sender` (e.g., via an internal ERC721 or an external `positionNFTs.mint`).\\n- Add at the start of `depositExactAmount`, `withdrawExactShares`, and `withdrawExactAmount`:\\n  `require(positionNFTs.ownerOf(_nftId) == msg.sender, \\\"Not position owner\\\");`\\n- Alternatively, if not using ERC721, store `positionOwner[_nftId]` at mint and check it similarly.\"\n    },\n    {\n      \"type\": \"Share accounting mismatch with fee-on-transfer / deflationary tokens enabling loss shifting\",\n      \"severity\": \"medium\",\n      \"vulnerable_lines\": [55, 61, 66, 67, 68, 72, 95, 96, 97, 118, 119, 120, 129],\n      \"location\": \"depositExactAmount(), withdrawExactShares(), withdrawExactAmount()\",\n      \"explanation\": \"The pool uses `_amount` as the credited deposit and increases `pseudoTotalPool` by `_amount` (LN-72) without verifying how many tokens were actually received (LN-55). For fee-on-transfer/deflationary tokens, the contract may receive less than `_amount`, but it still mints shares as if the full amount arrived (LN-61\u201370). This creates an accounting deficit: later withdrawals compute amounts based on `pseudoTotalPool` and shares (LN-95\u201397, LN-118\u2013120), potentially allowing early depositors to withdraw more than the contract truly received, with the shortfall effectively paid by later depositors (or causing withdrawals to revert until others add liquidity).\",\n      \"attack_scenario\": \"Assume token T charges a 10% fee on `transferFrom(from, this, amount)` but no fee (or smaller fee) on `transfer(this, to, amount)`.\\n1) Attacker deposits 1,000 T via `depositExactAmount(nftIdA, T, 1000)`; contract receives only 900 T, but `pseudoTotalPool` increases by 1,000 and attacker receives shares for 1,000.\\n2) Honest users deposit later, adding real balance to the contract.\\n3) Attacker withdraws based on their inflated shares (e.g., `withdrawExactAmount(..., 1000)`), receiving up to 1,000 T, where the extra 100 T comes from later users\u2019 deposits, effectively shifting the transfer fee loss onto them.\",\n      \"suggested_fix\": \"Use balance-delta accounting on deposit/withdraw:\\n- Before `transferFrom`, record `balBefore = IERC20(_poolToken).balanceOf(address(this))`.\\n- After `transferFrom`, record `balAfter` and set `received = balAfter - balBefore`.\\n- Use `received` (not `_amount`) to compute `shareAmount` and to increment `pseudoTotalPool`.\\nAdditionally, consider using OpenZeppelin `SafeERC20` and/or explicitly disallow fee-on-transfer tokens for pools.\"\n    }\n  ],\n  \"overall_explanation\": \"The contract is critically unsafe because `_nftId` is treated as an authorization boundary, but there is no ownership binding or check; anyone can withdraw against any `_nftId` and steal funds. A secondary issue is incorrect pool accounting for fee-on-transfer tokens: deposits credit the requested amount rather than the received amount, enabling loss shifting to later depositors or causing insolvency/withdrawal failures. Fixes require enforcing position ownership (via ERC721 or stored owner mapping) and using balance-delta accounting (and SafeERC20) for ERC20 interactions.\"\n}\n```"
+  },
+  "api_metrics": {
+    "input_tokens": 2616,
+    "output_tokens": 3029,
+    "latency_ms": 60832.95917510986
+  }
+}

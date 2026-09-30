@@ -1,0 +1,57 @@
+{
+  "sample_id": "tr_tc_039",
+  "variant": "trojan",
+  "model": "gpt-5.2",
+  "prompt_type": "direct",
+  "timestamp": "2026-01-05T04:41:07.168759+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "access_control",
+    "vulnerable_function": "createLockedCampaign",
+    "vulnerable_lines": [
+      66
+    ],
+    "severity": "critical"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.84,
+    "vulnerabilities": [
+      {
+        "type": "Campaign ID squatting / front-running denial of service (no binding between id and creator/manager)",
+        "severity": "medium",
+        "vulnerable_lines": [
+          64,
+          68
+        ],
+        "location": "createLockedCampaign",
+        "explanation": "Campaign creation is gated only by `require(campaigns[id].manager == address(0))` (LN-64), but the contract does not enforce any relationship between `id`, `msg.sender`, and `campaign.manager` before writing `campaigns[id] = campaign` (LN-68). Since `id` is fully user-chosen and `campaign.manager` is fully user-supplied, any third party can preemptively create a campaign for a given `id` (with any manager) and permanently block the intended creator\u2019s transaction (which will revert on LN-64). This is a concrete DoS/state-squatting attack against users relying on predictable or pre-announced campaign IDs.",
+        "attack_scenario": "1) Victim prepares a transaction to `createLockedCampaign(id=0xABCD..., campaign=...)` and broadcasts it (or publicly announces the intended id).\n2) Attacker monitors the mempool and copies the victim\u2019s `id`.\n3) Attacker front-runs with their own `createLockedCampaign` using the same `id` and any `campaign` struct (e.g., `campaign.manager = attacker`).\n4) Attacker\u2019s tx lands first, setting `campaigns[id]`.\n5) Victim\u2019s tx executes next and reverts at LN-64 (\"Campaign exists\"), preventing campaign creation.",
+        "suggested_fix": "Bind campaign creation to the caller and/or make IDs non-squattable:\n- Enforce: `require(campaign.manager == msg.sender, \"manager must be caller\");`\n- Derive `id` on-chain from `(msg.sender, nonce)` instead of allowing arbitrary `id`, or maintain a per-manager nonce.\n- Alternatively, require an EIP-712 signature from `campaign.manager` authorizing `(id, campaign params)`."
+      },
+      {
+        "type": "Reentrancy-enabled state manipulation via arbitrary external call after effects",
+        "severity": "low",
+        "vulnerable_lines": [
+          68,
+          85
+        ],
+        "location": "createLockedCampaign (external call to donation.tokenLocker)",
+        "explanation": "The contract writes critical state (`campaigns[id] = campaign` at LN-68) and then performs a low-level call to a user-controlled address `donation.tokenLocker` (LN-85). There is no reentrancy guard. Because `campaign.manager` is also user-controlled, an attacker can set `campaign.manager` to their `tokenLocker` contract, making reentrant calls to `cancelCampaign` pass its manager check. This enables deleting/overwriting a campaign within the same transaction after the existence check has been satisfied, producing inconsistent state (e.g., campaign disappears or is replaced) while the outer call continues to update analytics and emit an event based on stale memory values.",
+        "attack_scenario": "1) Attacker deploys a malicious `tokenLocker` contract implementing `createTokenLock(...)`.\n2) Attacker calls `createLockedCampaign(id=X, campaign.manager = tokenLockerAddress, donation.tokenLocker = tokenLockerAddress, donation.amount > 0, ...)`.\n3) During LN-85, `tokenLocker.createTokenLock` reenters `cancelCampaign(X)`; it succeeds because `campaigns[X].manager == tokenLockerAddress`.\n4) (Optional) Still reentrantly, `tokenLocker` calls `createLockedCampaign` again with the same `id=X` but different `campaign` data, since the campaign was deleted and LN-64 will pass.\n5) The outer call resumes and emits `CampaignCreated` for the original `campaign.manager` even though on-chain mapping may now be deleted/overwritten, causing state/event mismatch and allowing post-check replacement.",
+        "suggested_fix": "Apply checks-effects-interactions and reentrancy protection:\n- Add `nonReentrant` (OpenZeppelin ReentrancyGuard) to `createLockedCampaign` (and consider `cancelCampaign`).\n- Move the external interaction (token lock creation) before writing `campaigns[id]` OR store a temporary creation state and finalize after the call.\n- Avoid raw `.call`; use a trusted locker interface and allow only whitelisted lockers if this is meant to integrate with a specific locker implementation."
+      }
+    ],
+    "overall_explanation": "The contract is vulnerable primarily to (1) campaign ID squatting/front-running DoS because `id` and `campaign.manager` are not bound to the caller, letting anyone pre-create a campaign for any `id` and block intended creations. Additionally, `createLockedCampaign` performs an arbitrary external call to a user-controlled address after writing state, enabling reentrancy-based deletion/overwrite of campaigns within the same transaction (state/event inconsistencies and post-check mutation). No direct fund theft is present in this snippet, but unauthorized state manipulation/DoS is exploitable without any privileged role."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.84,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Campaign ID squatting / front-running denial of service (no binding between id and creator/manager)\",\n      \"severity\": \"medium\",\n      \"vulnerable_lines\": [64, 68],\n      \"location\": \"createLockedCampaign\",\n      \"explanation\": \"Campaign creation is gated only by `require(campaigns[id].manager == address(0))` (LN-64), but the contract does not enforce any relationship between `id`, `msg.sender`, and `campaign.manager` before writing `campaigns[id] = campaign` (LN-68). Since `id` is fully user-chosen and `campaign.manager` is fully user-supplied, any third party can preemptively create a campaign for a given `id` (with any manager) and permanently block the intended creator\u2019s transaction (which will revert on LN-64). This is a concrete DoS/state-squatting attack against users relying on predictable or pre-announced campaign IDs.\",\n      \"attack_scenario\": \"1) Victim prepares a transaction to `createLockedCampaign(id=0xABCD..., campaign=...)` and broadcasts it (or publicly announces the intended id).\\n2) Attacker monitors the mempool and copies the victim\u2019s `id`.\\n3) Attacker front-runs with their own `createLockedCampaign` using the same `id` and any `campaign` struct (e.g., `campaign.manager = attacker`).\\n4) Attacker\u2019s tx lands first, setting `campaigns[id]`.\\n5) Victim\u2019s tx executes next and reverts at LN-64 (\\\"Campaign exists\\\"), preventing campaign creation.\",\n      \"suggested_fix\": \"Bind campaign creation to the caller and/or make IDs non-squattable:\\n- Enforce: `require(campaign.manager == msg.sender, \\\"manager must be caller\\\");`\\n- Derive `id` on-chain from `(msg.sender, nonce)` instead of allowing arbitrary `id`, or maintain a per-manager nonce.\\n- Alternatively, require an EIP-712 signature from `campaign.manager` authorizing `(id, campaign params)`.\"\n    },\n    {\n      \"type\": \"Reentrancy-enabled state manipulation via arbitrary external call after effects\",\n      \"severity\": \"low\",\n      \"vulnerable_lines\": [68, 85],\n      \"location\": \"createLockedCampaign (external call to donation.tokenLocker)\",\n      \"explanation\": \"The contract writes critical state (`campaigns[id] = campaign` at LN-68) and then performs a low-level call to a user-controlled address `donation.tokenLocker` (LN-85). There is no reentrancy guard. Because `campaign.manager` is also user-controlled, an attacker can set `campaign.manager` to their `tokenLocker` contract, making reentrant calls to `cancelCampaign` pass its manager check. This enables deleting/overwriting a campaign within the same transaction after the existence check has been satisfied, producing inconsistent state (e.g., campaign disappears or is replaced) while the outer call continues to update analytics and emit an event based on stale memory values.\",\n      \"attack_scenario\": \"1) Attacker deploys a malicious `tokenLocker` contract implementing `createTokenLock(...)`.\\n2) Attacker calls `createLockedCampaign(id=X, campaign.manager = tokenLockerAddress, donation.tokenLocker = tokenLockerAddress, donation.amount > 0, ...)`.\\n3) During LN-85, `tokenLocker.createTokenLock` reenters `cancelCampaign(X)`; it succeeds because `campaigns[X].manager == tokenLockerAddress`.\\n4) (Optional) Still reentrantly, `tokenLocker` calls `createLockedCampaign` again with the same `id=X` but different `campaign` data, since the campaign was deleted and LN-64 will pass.\\n5) The outer call resumes and emits `CampaignCreated` for the original `campaign.manager` even though on-chain mapping may now be deleted/overwritten, causing state/event mismatch and allowing post-check replacement.\",\n      \"suggested_fix\": \"Apply checks-effects-interactions and reentrancy protection:\\n- Add `nonReentrant` (OpenZeppelin ReentrancyGuard) to `createLockedCampaign` (and consider `cancelCampaign`).\\n- Move the external interaction (token lock creation) before writing `campaigns[id]` OR store a temporary creation state and finalize after the call.\\n- Avoid raw `.call`; use a trusted locker interface and allow only whitelisted lockers if this is meant to integrate with a specific locker implementation.\"\n    }\n  ],\n  \"overall_explanation\": \"The contract is vulnerable primarily to (1) campaign ID squatting/front-running DoS because `id` and `campaign.manager` are not bound to the caller, letting anyone pre-create a campaign for any `id` and block intended creations. Additionally, `createLockedCampaign` performs an arbitrary external call to a user-controlled address after writing state, enabling reentrancy-based deletion/overwrite of campaigns within the same transaction (state/event inconsistencies and post-check mutation). No direct fund theft is present in this snippet, but unauthorized state manipulation/DoS is exploitable without any privileged role.\"\n}"
+  },
+  "api_metrics": {
+    "input_tokens": 2399,
+    "output_tokens": 3465,
+    "latency_ms": 69180.17506599426
+  }
+}

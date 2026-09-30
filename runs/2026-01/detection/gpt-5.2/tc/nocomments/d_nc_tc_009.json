@@ -1,0 +1,58 @@
+{
+  "sample_id": "nc_tc_009",
+  "variant": "nocomments",
+  "model": "gpt-5.2",
+  "prompt_type": "direct",
+  "timestamp": "2026-01-05T02:27:25.344529+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "reentrancy",
+    "vulnerable_function": "withdraw",
+    "vulnerable_lines": [
+      51,
+      54
+    ],
+    "severity": null
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.93,
+    "vulnerabilities": [
+      {
+        "type": "Missing asset transfer-in / improper token transfer in deposit (credits without receiving funds)",
+        "severity": "critical",
+        "vulnerable_lines": [
+          26
+        ],
+        "location": "supply()",
+        "explanation": "The pool attempts to \"collect\" deposits by calling token.transfer(address(this), amount) (LN-26). This call is executed by the pool contract, so it transfers tokens from the pool to itself, not from the user to the pool. As a result, the function can credit supplied[msg.sender][asset] (LN-29) without actually pulling funds from the depositor. An attacker can inflate their credited balance and later withdraw real tokens that were supplied by honest users (up to the pool\u2019s existing balance).",
+        "attack_scenario": "1) Wait until the pool holds some balance of token T (from any prior user deposits). 2) Call supply(T, X) with X <= current pool balance of T so that transfer(self,self,X) succeeds. No tokens are moved, but the attacker is credited +X. 3) Call withdraw(T, X) to receive X real tokens from the pool, draining liquidity provided by others. 4) Repeat until the pool\u2019s token T balance is depleted.",
+        "suggested_fix": "Replace the transfer-to-self pattern with a true transfer-in from the user. For ERC20-like tokens: require(IERC20(asset).transferFrom(msg.sender, address(this), amount), \"transferFrom failed\"); For ERC777: use operatorSend(msg.sender, address(this), amount, \"\", \"\") with prior operator authorization, or otherwise enforce that the pool actually receives the tokens (balance delta check)."
+      },
+      {
+        "type": "Reentrancy via ERC777 hooks in withdraw (state updated after external call)",
+        "severity": "critical",
+        "vulnerable_lines": [
+          51,
+          54,
+          55
+        ],
+        "location": "withdraw()",
+        "explanation": "withdraw() performs an external token transfer to msg.sender (LN-51) before updating internal accounting (LN-54 to LN-55). With ERC777 tokens, transfers can invoke recipient hooks (tokensReceived) on the receiver, allowing a malicious receiver contract to reenter withdraw() while their supplied balance is still unchanged, enabling multiple withdrawals against the same recorded balance and draining the pool.",
+        "attack_scenario": "1) Attacker deploys a contract implementing ERC777Recipient (tokensReceived) and registers it in the ERC1820 registry. 2) Attacker obtains any positive supplied balance (e.g., via the supply bug above, or by depositing legitimately). 3) Attacker calls withdraw(asset, A). 4) During LN-51, the ERC777 token calls tokensReceived on the attacker contract, which reenters withdraw(asset, A) again. 5) Because supplied[msg.sender][asset] has not yet been decreased (LN-54 happens after the transfer), each reentrant call passes checks and transfers more tokens. 6) Repeat until pool balance is drained or gas runs out.",
+        "suggested_fix": "Apply checks-effects-interactions: decrement supplied/totalSupplied before calling transfer. Additionally add a ReentrancyGuard (nonReentrant) to withdraw (and potentially supply). Also check the return value of IERC777(asset).transfer(...) and revert on failure."
+      }
+    ],
+    "overall_explanation": "The contract is critically vulnerable. Deposits are not actually transferred from users due to using transfer-to-self in supply() (LN-26), allowing attackers to mint internal credit and withdraw real pooled funds. Separately, withdraw() is reentrancy-vulnerable because it transfers tokens before updating balances (LN-51 before LN-54/55), enabling ERC777 hook-based reentrancy to withdraw multiple times against the same balance. Either issue can lead to loss of all assets held by the pool."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.93,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Missing asset transfer-in / improper token transfer in deposit (credits without receiving funds)\",\n      \"severity\": \"critical\",\n      \"vulnerable_lines\": [26],\n      \"location\": \"supply()\",\n      \"explanation\": \"The pool attempts to \\\"collect\\\" deposits by calling token.transfer(address(this), amount) (LN-26). This call is executed by the pool contract, so it transfers tokens from the pool to itself, not from the user to the pool. As a result, the function can credit supplied[msg.sender][asset] (LN-29) without actually pulling funds from the depositor. An attacker can inflate their credited balance and later withdraw real tokens that were supplied by honest users (up to the pool\u2019s existing balance).\",\n      \"attack_scenario\": \"1) Wait until the pool holds some balance of token T (from any prior user deposits). 2) Call supply(T, X) with X <= current pool balance of T so that transfer(self,self,X) succeeds. No tokens are moved, but the attacker is credited +X. 3) Call withdraw(T, X) to receive X real tokens from the pool, draining liquidity provided by others. 4) Repeat until the pool\u2019s token T balance is depleted.\",\n      \"suggested_fix\": \"Replace the transfer-to-self pattern with a true transfer-in from the user. For ERC20-like tokens: require(IERC20(asset).transferFrom(msg.sender, address(this), amount), \\\"transferFrom failed\\\"); For ERC777: use operatorSend(msg.sender, address(this), amount, \\\"\\\", \\\"\\\") with prior operator authorization, or otherwise enforce that the pool actually receives the tokens (balance delta check).\"\n    },\n    {\n      \"type\": \"Reentrancy via ERC777 hooks in withdraw (state updated after external call)\",\n      \"severity\": \"critical\",\n      \"vulnerable_lines\": [51, 54, 55],\n      \"location\": \"withdraw()\",\n      \"explanation\": \"withdraw() performs an external token transfer to msg.sender (LN-51) before updating internal accounting (LN-54 to LN-55). With ERC777 tokens, transfers can invoke recipient hooks (tokensReceived) on the receiver, allowing a malicious receiver contract to reenter withdraw() while their supplied balance is still unchanged, enabling multiple withdrawals against the same recorded balance and draining the pool.\",\n      \"attack_scenario\": \"1) Attacker deploys a contract implementing ERC777Recipient (tokensReceived) and registers it in the ERC1820 registry. 2) Attacker obtains any positive supplied balance (e.g., via the supply bug above, or by depositing legitimately). 3) Attacker calls withdraw(asset, A). 4) During LN-51, the ERC777 token calls tokensReceived on the attacker contract, which reenters withdraw(asset, A) again. 5) Because supplied[msg.sender][asset] has not yet been decreased (LN-54 happens after the transfer), each reentrant call passes checks and transfers more tokens. 6) Repeat until pool balance is drained or gas runs out.\",\n      \"suggested_fix\": \"Apply checks-effects-interactions: decrement supplied/totalSupplied before calling transfer. Additionally add a ReentrancyGuard (nonReentrant) to withdraw (and potentially supply). Also check the return value of IERC777(asset).transfer(...) and revert on failure.\"\n    }\n  ],\n  \"overall_explanation\": \"The contract is critically vulnerable. Deposits are not actually transferred from users due to using transfer-to-self in supply() (LN-26), allowing attackers to mint internal credit and withdraw real pooled funds. Separately, withdraw() is reentrancy-vulnerable because it transfers tokens before updating balances (LN-51 before LN-54/55), enabling ERC777 hook-based reentrancy to withdraw multiple times against the same balance. Either issue can lead to loss of all assets held by the pool.\"\n}\n```"
+  },
+  "api_metrics": {
+    "input_tokens": 1548,
+    "output_tokens": 1638,
+    "latency_ms": 38511.86513900757
+  }
+}

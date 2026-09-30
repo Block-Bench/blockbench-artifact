@@ -1,0 +1,41 @@
+{
+  "sample_id": "gs_002",
+  "dataset": "gs",
+  "prompt_type": "context_protocol",
+  "model": "gpt-5.2",
+  "timestamp": "2026-01-05T13:44:24.368259+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "logic_error",
+    "vulnerable_functions": [
+      "getSwapFee"
+    ],
+    "severity": "medium",
+    "description": "Governance can configure `DynamicSwapFeeModule` with fees up to 50%, but `CLFactory.getSwapFee` discards any value above 100_000 ppm (10%) and falls back to the tick-spacing default (often 500 ppm = 0.05%) without reverting or logging. Operators see the module reporting 20%, yet users continue paying the tiny default fee. The silent fallback misleads governance into believing higher fees are active. Impact - Governance believes a protective high fee is set (e.g., during launch anti-MEV), but the effective fee drops back to the default (e.g., 0.05%). - Traders are charged far less than intended, defeating protective or revenue objectives. - The misconfiguration has no on-chain signal, so the mistake can persist unnoticed. Root Cause - getSwapFee checks fee <= 100_000 ; larger values are ignored and the function returns tickSpacingToFee . - The module itself allows feeCap up to 500_000 (50%), so governance can set a value the factory immediately discards in favor of the default.",
+    "root_cause": "Governance can configure `DynamicSwapFeeModule` with fees up to 50%, but `CLFactory.getSwapFee` discards any value above 100_000 ppm (10%) and falls back to the tick-spacing default (often 500 ppm = 0.05%) without reverting or logging. Operators see the module reporting 20%, yet users continue paying the tiny default fee. The silent fallback misleads governance into believing higher fees are active. Impact - Governance believes a protective high fee is set (e.g., during launch anti-MEV), but the effective fee drops back to the default (e.g., 0.05%). - Traders are charged far less than intended, defeating protective or revenue objectives. - The misconfiguration has no on-chain signal, so the mistake can persist unnoticed. Root Cause - getSwapFee checks fee <= 100_000 ; larger values are ignored and the function returns tickSpacingToFee . - The module itself allows feeCap up to 500_000 (50%), so governance can set a value the factory immediately discards in favor of the default.",
+    "attack_scenario": "cd cl forge test --match-path test/PoC_DynamicFee_ClampToDefault.t.sol -vvv The PoC lifts the module cap, sets a 20% custom fee, and shows that `DynamicSwapFeeModule.getFee` returns 200_000 while `CLFactory.getSwapFee` still returns the base 500 ppm. PoC source ( `cl/test/PoC_DynamicFee_ClampToDefault.t.sol` ): // SPDX-License-Identifier: MIT pragma solidity 0.7.6; pragma abicoder v2; import \"forge-std/Test.sol\"; import {C4PoCTestbed} from \"./C4PoCTestbed.t.sol\"; import {DynamicSwapFeeModule} from \"contracts/core/fees/DynamicSwapFeeModule.sol\"; contract PoC_DynamicFee_ClampToDefault is C4PoCTestbed { address internal pool; function setUp() public override { super.setUp(); pool = poolFactory.createPool(USDC, DAI, 100, uint160(2 ** 96)); require(pool != address(0), \"pool not created\"); } function testFactoryClampsFeeAboveTenPercent() public { address manager = poolFactory.swapFeeManager(); vm.prank(manager); swapFeeModule.setFeeCap(pool, 500_000); // raise module cap to 50% vm.prank(manager); swapFeeModule.setScalingFactor(pool, 1); // ensure positive TWAP delta doesn't zero fee uint24 highFee = 200_000; // 20% vm.prank(manager); swapFeeModule.setCustomFee(pool, highFee); uint24 moduleFee = swapFeeModule.getFee(pool); assertEq(uint256(moduleFee), uint256(highFee), \"module reports configured fee\"); uint24 factoryFee = poolFactory.getSwapFee(pool); assertEq(uint256(factoryFee), 500, \"factory silently clamps to tick-spacing default\"); } }",
+    "fix_description": "Either revert when the module returns > 100_000 or raise the factory ceiling to match the module\u2019s cap. Emit events or add admin tooling to surface out-of-range configurations so operators can correct them. Hybra Finance mitigated: Added setMaxFee() function to make the fee cap configurable by the owner (up to 50%). This replaces the hardcoded limit and allows governance to adjust the maximum dynamic fee when needed.",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "safe",
+    "confidence": 0.9,
+    "vulnerabilities": [],
+    "overall_explanation": "No clear, non-admin, exploitable vulnerabilities are present in the provided CLFactory code.\n\nKey observations:\n- Pool creation uses CREATE2 via OpenZeppelin Clones.cloneDeterministic with a salt derived from (token0, token1, tickSpacing), and the factory enforces uniqueness through getPool checks, preventing duplicate pool deployments.\n- Privileged setters (owner / swapFeeManager / unstakedFeeManager / protocolFeeManager) are consistently gated by msg.sender checks.\n- Dynamic fee lookups use ExcessivelySafeCall staticcalls with hard caps on gas and return data size, limiting reentrancy and memory blowups from fee modules.\n- Fee bounds are enforced on returned module fees (swap fee <= 100_000, unstaked <= 1_000_000, protocol <= 500_000) with safe fallbacks.\n\nPotential issues that were not reported as vulnerabilities because they are either configuration-dependent or only affect privileged operations:\n- If gaugeManager is unset (address(0)), calls to getUnstakedFee/getProtocolFee will revert due to an external call to address(0). This is an initialization/configuration risk controlled by the owner, not an unprivileged exploit path.\n- collectAllProtocolFees may run out of gas as allPools grows, but it is owner-only and does not enable fund theft or unprivileged state manipulation.\n\nBased on the provided code alone, the contract appears safe against unprivileged attackers."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "{\n  \"verdict\": \"safe\",\n  \"confidence\": 0.9,\n  \"vulnerabilities\": [],\n  \"overall_explanation\": \"No clear, non-admin, exploitable vulnerabilities are present in the provided CLFactory code.\\n\\nKey observations:\\n- Pool creation uses CREATE2 via OpenZeppelin Clones.cloneDeterministic with a salt derived from (token0, token1, tickSpacing), and the factory enforces uniqueness through getPool checks, preventing duplicate pool deployments.\\n- Privileged setters (owner / swapFeeManager / unstakedFeeManager / protocolFeeManager) are consistently gated by msg.sender checks.\\n- Dynamic fee lookups use ExcessivelySafeCall staticcalls with hard caps on gas and return data size, limiting reentrancy and memory blowups from fee modules.\\n- Fee bounds are enforced on returned module fees (swap fee <= 100_000, unstaked <= 1_000_000, protocol <= 500_000) with safe fallbacks.\\n\\nPotential issues that were not reported as vulnerabilities because they are either configuration-dependent or only affect privileged operations:\\n- If gaugeManager is unset (address(0)), calls to getUnstakedFee/getProtocolFee will revert due to an external call to address(0). This is an initialization/configuration risk controlled by the owner, not an unprivileged exploit path.\\n- collectAllProtocolFees may run out of gas as allPools grows, but it is owner-only and does not enable fund theft or unprivileged state manipulation.\\n\\nBased on the provided code alone, the contract appears safe against unprivileged attackers.\"\n}"
+  },
+  "context_info": {
+    "has_context_files": false,
+    "context_file_count": 0,
+    "has_protocol_doc": true
+  },
+  "api_metrics": {
+    "input_tokens": 3230,
+    "output_tokens": 1482,
+    "latency_ms": 37394.891023635864
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "sample_id": "gs_019",
+  "dataset": "gs",
+  "prompt_type": "context_protocol",
+  "model": "gemini-3-pro-hyper-extended",
+  "timestamp": "2026-01-05T14:14:41.900954+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "input_validation",
+    "vulnerable_functions": [
+      "withdrawPhantomToken"
+    ],
+    "severity": "medium",
+    "description": "MidasRedemptionVaultAdapter.withdrawPhantomToken(token, amount) only checks that a phantom token is registered for the given token address (phantomTokenToOutputToken[token] != address(0)) and does not verify that the pending redemption's tokenOut matches the expected underlying. This means the integration may receive a different token than expected if the redemption request was made for a different output token than what the phantom token tracks.",
+    "root_cause": "MidasRedemptionVaultAdapter.withdrawPhantomToken(token, amount) only checks that a phantom token is registered for the given token address (phantomTokenToOutputToken[token] != address(0)) and does not verify that the pending redemption's tokenOut matches the expected underlying. This means the integration may receive a different token than expected if the redemption request was made for a different output token than what the phantom token tracks.",
+    "attack_scenario": "1. Configurator sets up phantom token A tracking output token USDC via setTokenAllowedStatusBatch()\n2. phantomTokenToOutputToken[phantomA] = USDC\n3. User makes a redemption request for output token USDT (different from USDC)\n4. pendingRedemptions records the request with tokenOut = USDT\n5. User calls withdrawPhantomToken(phantomA, amount)\n6. Function checks: phantomTokenToOutputToken[phantomA] != address(0) -> passes (it's USDC)\n7. Function calls _withdraw(amount) which executes Gateway.withdraw()\n8. Gateway.withdraw() transfers USDT (the actual redemption output) not USDC\n9. The phantom token (tracking USDC) and actual withdrawal (USDT) are mismatched\n10. Integration receives unexpected token, potentially causing accounting errors or failed operations",
+    "fix_description": "Add validation in setTokenAllowedStatusBatch() to ensure that the phantom token's tokenOut matches the output token it was added alongside with. This prevents mismatched phantom token configurations.",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.95,
+    "vulnerabilities": [
+      {
+        "type": "Logic Error / Interface Mismatch",
+        "severity": "high",
+        "vulnerable_function": "withdrawPhantomToken",
+        "location": "MidasRedemptionVaultAdapter.sol: _withdraw, withdrawPhantomToken, withdraw",
+        "explanation": "The adapter is designed to support multiple output tokens (e.g., USDC, USDT) via a single Midas Gateway. The Gateway tracks pending redemptions specifically by the output token address (evidenced by `requestRedeem(tokenOut, ...)` and `pendingTokenOutAmount(..., tokenOut)`). However, the `_withdraw` function constructs a call to the Gateway using only the `amount` parameter: `abi.encodeCall(IMidasRedemptionVaultGateway.withdraw, (amount))`. It fails to pass the specific `tokenOut` address to the Gateway. \n\nThis results in two critical failure modes:\n1. If the Gateway expects `withdraw(address token, uint256 amount)`, the adapter's call will have a function selector mismatch and revert, causing a Denial of Service for all withdrawals.\n2. If the Gateway accepts `withdraw(uint256 amount)` but manages multiple tokens, it cannot distinguish which token the user intends to withdraw, leading to potential loss of funds or state corruption.",
+        "attack_scenario": "1. A user (via Credit Account) requests a redemption of `mToken` for `USDC` using `redeemRequest`. This creates a pending balance in the Midas Gateway tracked under `USDC`.\n2. After the redemption is processed, the user calls `withdrawPhantomToken(phantomUSDC, amount)` to claim their USDC.\n3. The adapter validates the phantom token but then calls `gateway.withdraw(amount)`, dropping the `USDC` token context.\n4. The call to the Gateway fails (reverts) due to signature mismatch, or executes ambiguously (if the Gateway supports a generic withdraw), potentially withdrawing the wrong asset or failing to decrement the correct pending balance.",
+        "suggested_fix": "Update the `_withdraw` function to accept the output token address and pass it to the Gateway. Update `withdrawPhantomToken` to retrieve the underlying output token and pass it to `_withdraw`.\n\n```solidity\nfunction withdrawPhantomToken(address token, uint256 amount) external override creditFacadeOnly returns (bool) {\n    address tokenOut = phantomTokenToOutputToken[token];\n    if (tokenOut == address(0)) revert IncorrectStakedPhantomTokenException();\n    _withdraw(tokenOut, amount);\n    return false;\n}\n\nfunction _withdraw(address tokenOut, uint256 amount) internal {\n    _execute(abi.encodeCall(IMidasRedemptionVaultGateway.withdraw, (tokenOut, amount)));\n}\n```"
+      }
+    ],
+    "overall_explanation": "The contract contains a high-severity logic error in the withdrawal flow. While the adapter correctly handles multi-token support during redemption requests (mapping phantom tokens to output tokens), it fails to propagate this token information during the withdrawal step. The `withdraw` call to the external Gateway is missing the token address argument, which is necessary for a Gateway that manages multiple output tokens. This will likely result in a permanent Denial of Service for withdrawals (due to function signature mismatch) or incorrect behavior."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.95,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Logic Error / Interface Mismatch\",\n      \"severity\": \"high\",\n      \"vulnerable_function\": \"withdrawPhantomToken\",\n      \"location\": \"MidasRedemptionVaultAdapter.sol: _withdraw, withdrawPhantomToken, withdraw\",\n      \"explanation\": \"The adapter is designed to support multiple output tokens (e.g., USDC, USDT) via a single Midas Gateway. The Gateway tracks pending redemptions specifically by the output token address (evidenced by `requestRedeem(tokenOut, ...)` and `pendingTokenOutAmount(..., tokenOut)`). However, the `_withdraw` function constructs a call to the Gateway using only the `amount` parameter: `abi.encodeCall(IMidasRedemptionVaultGateway.withdraw, (amount))`. It fails to pass the specific `tokenOut` address to the Gateway. \\n\\nThis results in two critical failure modes:\\n1. If the Gateway expects `withdraw(address token, uint256 amount)`, the adapter's call will have a function selector mismatch and revert, causing a Denial of Service for all withdrawals.\\n2. If the Gateway accepts `withdraw(uint256 amount)` but manages multiple tokens, it cannot distinguish which token the user intends to withdraw, leading to potential loss of funds or state corruption.\",\n      \"attack_scenario\": \"1. A user (via Credit Account) requests a redemption of `mToken` for `USDC` using `redeemRequest`. This creates a pending balance in the Midas Gateway tracked under `USDC`.\\n2. After the redemption is processed, the user calls `withdrawPhantomToken(phantomUSDC, amount)` to claim their USDC.\\n3. The adapter validates the phantom token but then calls `gateway.withdraw(amount)`, dropping the `USDC` token context.\\n4. The call to the Gateway fails (reverts) due to signature mismatch, or executes ambiguously (if the Gateway supports a generic withdraw), potentially withdrawing the wrong asset or failing to decrement the correct pending balance.\",\n      \"suggested_fix\": \"Update the `_withdraw` function to accept the output token address and pass it to the Gateway. Update `withdrawPhantomToken` to retrieve the underlying output token and pass it to `_withdraw`.\\n\\n```solidity\\nfunction withdrawPhantomToken(address token, uint256 amount) external override creditFacadeOnly returns (bool) {\\n    address tokenOut = phantomTokenToOutputToken[token];\\n    if (tokenOut == address(0)) revert IncorrectStakedPhantomTokenException();\\n    _withdraw(tokenOut, amount);\\n    return false;\\n}\\n\\nfunction _withdraw(address tokenOut, uint256 amount) internal {\\n    _execute(abi.encodeCall(IMidasRedemptionVaultGateway.withdraw, (tokenOut, amount)));\\n}\\n```\"\n    }\n  ],\n  \"overall_explanation\": \"The contract contains a high-severity logic error in the withdrawal flow. While the adapter correctly handles multi-token support during redemption requests (mapping phantom tokens to output tokens), it fails to propagate this token information during the withdrawal step. The `withdraw` call to the external Gateway is missing the token address argument, which is necessary for a Gateway that manages multiple output tokens. This will likely result in a permanent Denial of Service for withdrawals (due to function signature mismatch) or incorrect behavior.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": true,
+    "context_file_count": 1,
+    "has_protocol_doc": true
+  },
+  "api_metrics": {
+    "input_tokens": 3711,
+    "output_tokens": 7943,
+    "latency_ms": 79559.03601646423
+  }
+}

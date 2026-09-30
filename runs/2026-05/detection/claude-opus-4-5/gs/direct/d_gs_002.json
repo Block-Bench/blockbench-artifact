@@ -1,0 +1,51 @@
+{
+  "sample_id": "gs_002",
+  "dataset": "gs",
+  "prompt_type": "direct",
+  "model": "claude-opus-4-5",
+  "timestamp": "2026-05-25T06:29:35.697445+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "logic_error",
+    "vulnerable_functions": [
+      "getSwapFee"
+    ],
+    "severity": "medium",
+    "description": "Governance can configure `DynamicSwapFeeModule` with fees up to 50%, but `CLFactory.getSwapFee` discards any value above 100_000 ppm (10%) and falls back to the tick-spacing default (often 500 ppm = 0.05%) without reverting or logging. Operators see the module reporting 20%, yet users continue paying the tiny default fee. The silent fallback misleads governance into believing higher fees are active. Impact - Governance believes a protective high fee is set (e.g., during launch anti-MEV), but the effective fee drops back to the default (e.g., 0.05%). - Traders are charged far less than intended, defeating protective or revenue objectives. - The misconfiguration has no on-chain signal, so the mistake can persist unnoticed. Root Cause - getSwapFee checks fee <= 100_000 ; larger values are ignored and the function returns tickSpacingToFee . - The module itself allows feeCap up to 500_000 (50%), so governance can set a value the factory immediately discards in favor of the default.",
+    "root_cause": "Governance can configure `DynamicSwapFeeModule` with fees up to 50%, but `CLFactory.getSwapFee` discards any value above 100_000 ppm (10%) and falls back to the tick-spacing default (often 500 ppm = 0.05%) without reverting or logging. Operators see the module reporting 20%, yet users continue paying the tiny default fee. The silent fallback misleads governance into believing higher fees are active. Impact - Governance believes a protective high fee is set (e.g., during launch anti-MEV), but the effective fee drops back to the default (e.g., 0.05%). - Traders are charged far less than intended, defeating protective or revenue objectives. - The misconfiguration has no on-chain signal, so the mistake can persist unnoticed. Root Cause - getSwapFee checks fee <= 100_000 ; larger values are ignored and the function returns tickSpacingToFee . - The module itself allows feeCap up to 500_000 (50%), so governance can set a value the factory immediately discards in favor of the default.",
+    "attack_scenario": "cd cl forge test --match-path test/PoC_DynamicFee_ClampToDefault.t.sol -vvv The PoC lifts the module cap, sets a 20% custom fee, and shows that `DynamicSwapFeeModule.getFee` returns 200_000 while `CLFactory.getSwapFee` still returns the base 500 ppm. PoC source ( `cl/test/PoC_DynamicFee_ClampToDefault.t.sol` ): // SPDX-License-Identifier: MIT pragma solidity 0.7.6; pragma abicoder v2; import \"forge-std/Test.sol\"; import {C4PoCTestbed} from \"./C4PoCTestbed.t.sol\"; import {DynamicSwapFeeModule} from \"contracts/core/fees/DynamicSwapFeeModule.sol\"; contract PoC_DynamicFee_ClampToDefault is C4PoCTestbed { address internal pool; function setUp() public override { super.setUp(); pool = poolFactory.createPool(USDC, DAI, 100, uint160(2 ** 96)); require(pool != address(0), \"pool not created\"); } function testFactoryClampsFeeAboveTenPercent() public { address manager = poolFactory.swapFeeManager(); vm.prank(manager); swapFeeModule.setFeeCap(pool, 500_000); // raise module cap to 50% vm.prank(manager); swapFeeModule.setScalingFactor(pool, 1); // ensure positive TWAP delta doesn't zero fee uint24 highFee = 200_000; // 20% vm.prank(manager); swapFeeModule.setCustomFee(pool, highFee); uint24 moduleFee = swapFeeModule.getFee(pool); assertEq(uint256(moduleFee), uint256(highFee), \"module reports configured fee\"); uint24 factoryFee = poolFactory.getSwapFee(pool); assertEq(uint256(factoryFee), 500, \"factory silently clamps to tick-spacing default\"); } }",
+    "fix_description": "Either revert when the module returns > 100_000 or raise the factory ceiling to match the module\u2019s cap. Emit events or add admin tooling to surface out-of-range configurations so operators can correct them. Hybra Finance mitigated: Added setMaxFee() function to make the fee cap configurable by the owner (up to 50%). This replaces the hardcoded limit and allows governance to adjust the maximum dynamic fee when needed.",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.92,
+    "vulnerabilities": [
+      {
+        "type": "logic_error",
+        "severity": "medium",
+        "vulnerable_function": "getSwapFee",
+        "location": "CLFactory.getSwapFee()",
+        "explanation": "The `getSwapFee` function silently discards any fee value returned by the `swapFeeModule` that exceeds 100,000 ppm (10%) and falls back to the default `tickSpacingToFee` value without any revert or event emission. This creates a dangerous mismatch: the `DynamicSwapFeeModule` can be configured with fees up to 50% (500,000 ppm), but the factory will ignore any value above 10% and use the default (often 0.05%). Governance believes a high protective fee is active (e.g., 20% for anti-MEV during launch), but users actually pay the tiny default fee. There is no on-chain signal of this misconfiguration.",
+        "attack_scenario": "1. Governance sets up a `DynamicSwapFeeModule` with a 20% fee (200,000 ppm) to protect against MEV during token launch. 2. The module correctly returns 200,000 when `getFee()` is called. 3. `CLFactory.getSwapFee()` receives this value but the check `fee <= 100_000` fails. 4. The function silently returns `tickSpacingToFee[tickSpacing]` which is typically 500 ppm (0.05%). 5. MEV bots and arbitrageurs exploit the pool paying only 0.05% instead of the intended 20% fee. 6. Governance remains unaware because no revert or event indicates the fee was ignored. 7. The protocol loses significant revenue and the protective mechanism fails entirely.",
+        "suggested_fix": "Either revert when the module returns a fee above the maximum allowed threshold, or raise the factory's fee ceiling to match the module's cap. Add explicit validation: `require(fee <= 100_000, \"Fee exceeds maximum\");` after decoding, or emit an event when a fee is rejected. Alternatively, make the 100,000 ceiling configurable via a `setMaxFee()` function controlled by the owner, allowing alignment with the fee module's capabilities."
+      }
+    ],
+    "overall_explanation": "The CLFactory contract contains a logic error in `getSwapFee()` where fees above 10% (100,000 ppm) returned by the swap fee module are silently ignored, causing the function to fall back to default tick-spacing fees. This creates a critical mismatch between what governance configures and what users actually pay. The vulnerability is particularly dangerous because there's no on-chain indication of the misconfiguration - no revert, no event, no logging. Governance can believe protective high fees are active while the actual fees remain at minimal defaults, defeating anti-MEV protections and revenue objectives."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.92,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"logic_error\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"getSwapFee\",\n      \"location\": \"CLFactory.getSwapFee()\",\n      \"explanation\": \"The `getSwapFee` function silently discards any fee value returned by the `swapFeeModule` that exceeds 100,000 ppm (10%) and falls back to the default `tickSpacingToFee` value without any revert or event emission. This creates a dangerous mismatch: the `DynamicSwapFeeModule` can be configured with fees up to 50% (500,000 ppm), but the factory will ignore any value above 10% and use the default (often 0.05%). Governance believes a high protective fee is active (e.g., 20% for anti-MEV during launch), but users actually pay the tiny default fee. There is no on-chain signal of this misconfiguration.\",\n      \"attack_scenario\": \"1. Governance sets up a `DynamicSwapFeeModule` with a 20% fee (200,000 ppm) to protect against MEV during token launch. 2. The module correctly returns 200,000 when `getFee()` is called. 3. `CLFactory.getSwapFee()` receives this value but the check `fee <= 100_000` fails. 4. The function silently returns `tickSpacingToFee[tickSpacing]` which is typically 500 ppm (0.05%). 5. MEV bots and arbitrageurs exploit the pool paying only 0.05% instead of the intended 20% fee. 6. Governance remains unaware because no revert or event indicates the fee was ignored. 7. The protocol loses significant revenue and the protective mechanism fails entirely.\",\n      \"suggested_fix\": \"Either revert when the module returns a fee above the maximum allowed threshold, or raise the factory's fee ceiling to match the module's cap. Add explicit validation: `require(fee <= 100_000, \\\"Fee exceeds maximum\\\");` after decoding, or emit an event when a fee is rejected. Alternatively, make the 100,000 ceiling configurable via a `setMaxFee()` function controlled by the owner, allowing alignment with the fee module's capabilities.\"\n    }\n  ],\n  \"overall_explanation\": \"The CLFactory contract contains a logic error in `getSwapFee()` where fees above 10% (100,000 ppm) returned by the swap fee module are silently ignored, causing the function to fall back to default tick-spacing fees. This creates a critical mismatch between what governance configures and what users actually pay. The vulnerability is particularly dangerous because there's no on-chain indication of the misconfiguration - no revert, no event, no logging. Governance can believe protective high fees are active while the actual fees remain at minimal defaults, defeating anti-MEV protections and revenue objectives.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": false,
+    "context_file_count": 0,
+    "has_protocol_doc": false
+  },
+  "api_metrics": {
+    "input_tokens": 4666,
+    "output_tokens": 716,
+    "latency_ms": 13683.577299118042
+  }
+}

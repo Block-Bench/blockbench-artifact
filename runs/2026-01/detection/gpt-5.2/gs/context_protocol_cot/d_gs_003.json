@@ -1,0 +1,51 @@
+{
+  "sample_id": "gs_003",
+  "dataset": "gs",
+  "prompt_type": "context_protocol_cot",
+  "model": "gpt-5.2",
+  "timestamp": "2026-01-05T13:45:52.649844+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "logic_error",
+    "vulnerable_functions": [
+      "emergencyWithdraw"
+    ],
+    "severity": "medium",
+    "description": "in the `GaugeV2` contract, if the contract was emergency activated, users calling `emergencyWithdraw()` will lose all past accrued rewards that didn\u2019t have `updateReward()` called on it previously for a user to earn rewards, he gets his mappings updated here modifier updateReward(address account) { rewardPerTokenStored = rewardPerToken(); lastUpdateTime = lastTimeRewardApplicable(); if (account != address(0)) { rewards[account] = earned(account); userRewardPerTokenPaid[account] = rewardPerTokenStored; } _; } as we see above, rewards mapping is registered as the return data from `earned()`, and when we look at it we see function earned(address account) public view returns (uint256) { rewards[account] + _balanceOf(account) * (rewardPerToken() - userRewardPerTokenPaid[account]) / 1e18; } we see that it returns old rewards + current balance of the user multiplied by the rewardPerToken (abstractly) so what happen will be as follows: 1. User stake 100e18 tokens 2. emergency activated 3. he had already earnt before the emergency 10e18 tokens not registered on his rewards mapping since he didn\u2019t call deposit/withdraw/getRewards to update his rewards 4. call emergencyWithdraw and his balance now is 0. 5. now earned() function return 0 rewards since his balance is 0 * rewardPerToken = 0 also the left-off rewards tokens are stuck in the contract forever. Impact: Loss of rewards for users and stuck reward tokens in the contract",
+    "root_cause": "in the `GaugeV2` contract, if the contract was emergency activated, users calling `emergencyWithdraw()` will lose all past accrued rewards that didn\u2019t have `updateReward()` called on it previously for a user to earn rewards, he gets his mappings updated here modifier updateReward(address account) { rewardPerTokenStored = rewardPerToken(); lastUpdateTime = lastTimeRewardApplicable(); if (account != address(0)) { rewards[account] = earned(account); userRewardPerTokenPaid[account] = rewardPerTokenStored; } _; } as we see above, rewards mapping is registered as the return data from `earned()`, and when we look at it we see function earned(address account) public view returns (uint256) { rewards[account] + _balanceOf(account) * (rewardPerToken() - userRewardPerTokenPaid[account]) / 1e18; } we see that it returns old rewards + current balance of the user multiplied by the rewardPerToken (abstractly) so what happen will be as follows: 1. User stake 100e18 tokens 2. emergency activated 3. he had already earnt before the emergency 10e18 tokens not registered on his rewards mapping since he didn\u2019t call deposit/withdraw/getRewards to update his rewards 4. call emergencyWithdraw and his balance now is 0. 5. now earned() function return 0 rewards since his balance is 0 * rewardPerToken = 0 also the left-off rewards tokens are stuck in the contract forever. Impact: Loss of rewards for users and stuck reward tokens in the contract",
+    "attack_scenario": "function test_emergencyWithdraw_strandsRewardsAndBurnsUserAccrual() external { vm.startPrank(address(this)); // Use HYBR both as staking TOKEN and rewardToken for simplicity // We have HYBR minted to this test from setup_InitMinter() uint256 initialHybr = hybr.balanceOf(address(this)); assertGt(initialHybr, 0, \"expected HYBR from initial mint\"); // Deploy GaugeV2 GaugeV2 gauge = new GaugeV2( address(hybr), address(rewardHybr), address(votingEscrow), address(hybr), address(this), address(0), address(0), false ); // Stake HYBR uint256 stakeAmount = 100 ether; hybr.approve(address(gauge), type(uint256).max); gauge.deposit(stakeAmount); // Fund rewards uint256 rewardAmount = 1_000 ether; hybr.approve(address(gauge), rewardAmount); gauge.notifyRewardAmount(address(hybr), rewardAmount); // Accrue some rewards vm.warp(block.timestamp + 7 days / 14); uint256 accruedBefore = gauge.earned(address(this)); assertGt(accruedBefore, 0, \"accrued must be > 0 before emergencyWithdraw\"); // Enable emergency and withdraw gauge.activateEmergencyMode(); gauge.emergencyWithdraw(); uint256 accruedAfter = gauge.earned(address(this)); assertEq(accruedAfter, 0, \"accrued should be zero after emergencyWithdraw\"); uint256 stuckRewards = hybr.balanceOf(address(gauge)); assertGt(stuckRewards, 0, \"reward tokens remain stuck in gauge\"); vm.stopPrank(); }",
+    "fix_description": "Add the `updateReward` modifier to the `emergencyWithdraw()` call",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.78,
+    "vulnerabilities": [
+      {
+        "type": "Incorrect staking accounting for fee-on-transfer/deflationary tokens (deposit credit > received)",
+        "severity": "critical",
+        "vulnerable_function": "_deposit(uint256,address)",
+        "location": "GaugeV2._deposit",
+        "explanation": "The contract credits the user\u2019s stake (`_balances[account] += amount; _totalSupply += amount;`) BEFORE pulling tokens via `TOKEN.safeTransferFrom(account, address(this), amount)`. If `TOKEN` is fee-on-transfer/deflationary (or otherwise transfers less than `amount`), the contract will receive fewer tokens than it accounts for. Users can then withdraw their full credited balance, causing the gauge to pay out more tokens than it actually received, effectively draining other stakers\u2019 funds and/or making the contract insolvent. This is a real, exploitable mismatch between accounting and actual token balance and does not require any privileged role.",
+        "attack_scenario": "1) Assume TOKEN charges a 10% transfer fee.\n2) Attacker deposits 100 TOKEN. Gauge credits attacker with +100 stake, but only receives 90.\n3) Honest users deposit, creating a buffer of actual TOKEN held by the gauge.\n4) Attacker withdraws 100 TOKEN (allowed because balance accounting says 100). The extra 10 TOKEN comes from the pool (other stakers\u2019 deposited tokens).\n5) Repeating deposit/withdraw cycles extracts value until the gauge is drained/insolvent.",
+        "suggested_fix": "Account based on actual received amount:\n- Record `uint256 beforeBal = TOKEN.balanceOf(address(this));`\n- Perform `safeTransferFrom(...)`\n- Compute `uint256 received = TOKEN.balanceOf(address(this)) - beforeBal;`\n- Use `received` (not `amount`) to update `_balances` and `_totalSupply`.\nAlternatively, explicitly disallow fee-on-transfer tokens with a strict balance check (`received == amount`)."
+      }
+    ],
+    "overall_explanation": "GaugeV2 largely follows a standard staking-gauge pattern with reward-per-token accounting and reentrancy protection. However, the deposit flow updates internal stake accounting before transferring tokens in, which becomes critically unsafe if the staked TOKEN is fee-on-transfer/deflationary. In that case, users can be credited more stake than the gauge actually receives, enabling withdrawals that drain other users\u2019 deposits and potentially rendering the gauge insolvent."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.78,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Incorrect staking accounting for fee-on-transfer/deflationary tokens (deposit credit > received)\",\n      \"severity\": \"critical\",\n      \"vulnerable_function\": \"_deposit(uint256,address)\",\n      \"location\": \"GaugeV2._deposit\",\n      \"explanation\": \"The contract credits the user\u2019s stake (`_balances[account] += amount; _totalSupply += amount;`) BEFORE pulling tokens via `TOKEN.safeTransferFrom(account, address(this), amount)`. If `TOKEN` is fee-on-transfer/deflationary (or otherwise transfers less than `amount`), the contract will receive fewer tokens than it accounts for. Users can then withdraw their full credited balance, causing the gauge to pay out more tokens than it actually received, effectively draining other stakers\u2019 funds and/or making the contract insolvent. This is a real, exploitable mismatch between accounting and actual token balance and does not require any privileged role.\",\n      \"attack_scenario\": \"1) Assume TOKEN charges a 10% transfer fee.\\n2) Attacker deposits 100 TOKEN. Gauge credits attacker with +100 stake, but only receives 90.\\n3) Honest users deposit, creating a buffer of actual TOKEN held by the gauge.\\n4) Attacker withdraws 100 TOKEN (allowed because balance accounting says 100). The extra 10 TOKEN comes from the pool (other stakers\u2019 deposited tokens).\\n5) Repeating deposit/withdraw cycles extracts value until the gauge is drained/insolvent.\",\n      \"suggested_fix\": \"Account based on actual received amount:\\n- Record `uint256 beforeBal = TOKEN.balanceOf(address(this));`\\n- Perform `safeTransferFrom(...)`\\n- Compute `uint256 received = TOKEN.balanceOf(address(this)) - beforeBal;`\\n- Use `received` (not `amount`) to update `_balances` and `_totalSupply`.\\nAlternatively, explicitly disallow fee-on-transfer tokens with a strict balance check (`received == amount`).\"\n    }\n  ],\n  \"overall_explanation\": \"GaugeV2 largely follows a standard staking-gauge pattern with reward-per-token accounting and reentrancy protection. However, the deposit flow updates internal stake accounting before transferring tokens in, which becomes critically unsafe if the staked TOKEN is fee-on-transfer/deflationary. In that case, users can be credited more stake than the gauge actually receives, enabling withdrawals that drain other users\u2019 deposits and potentially rendering the gauge insolvent.\"\n}"
+  },
+  "context_info": {
+    "has_context_files": false,
+    "context_file_count": 0,
+    "has_protocol_doc": true
+  },
+  "api_metrics": {
+    "input_tokens": 3734,
+    "output_tokens": 1709,
+    "latency_ms": 39332.91006088257
+  }
+}

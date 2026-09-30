@@ -1,0 +1,87 @@
+{
+  "sample_id": "gs_002",
+  "dataset": "gs",
+  "prompt_type": "context_protocol_cot_adversarial",
+  "model": "claude-opus-4-5",
+  "timestamp": "2026-01-05T15:29:08.146130+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "logic_error",
+    "vulnerable_functions": [
+      "getSwapFee"
+    ],
+    "severity": "medium",
+    "description": "Governance can configure `DynamicSwapFeeModule` with fees up to 50%, but `CLFactory.getSwapFee` discards any value above 100_000 ppm (10%) and falls back to the tick-spacing default (often 500 ppm = 0.05%) without reverting or logging. Operators see the module reporting 20%, yet users continue paying the tiny default fee. The silent fallback misleads governance into believing higher fees are active. Impact - Governance believes a protective high fee is set (e.g., during launch anti-MEV), but the effective fee drops back to the default (e.g., 0.05%). - Traders are charged far less than intended, defeating protective or revenue objectives. - The misconfiguration has no on-chain signal, so the mistake can persist unnoticed. Root Cause - getSwapFee checks fee <= 100_000 ; larger values are ignored and the function returns tickSpacingToFee . - The module itself allows feeCap up to 500_000 (50%), so governance can set a value the factory immediately discards in favor of the default.",
+    "root_cause": "Governance can configure `DynamicSwapFeeModule` with fees up to 50%, but `CLFactory.getSwapFee` discards any value above 100_000 ppm (10%) and falls back to the tick-spacing default (often 500 ppm = 0.05%) without reverting or logging. Operators see the module reporting 20%, yet users continue paying the tiny default fee. The silent fallback misleads governance into believing higher fees are active. Impact - Governance believes a protective high fee is set (e.g., during launch anti-MEV), but the effective fee drops back to the default (e.g., 0.05%). - Traders are charged far less than intended, defeating protective or revenue objectives. - The misconfiguration has no on-chain signal, so the mistake can persist unnoticed. Root Cause - getSwapFee checks fee <= 100_000 ; larger values are ignored and the function returns tickSpacingToFee . - The module itself allows feeCap up to 500_000 (50%), so governance can set a value the factory immediately discards in favor of the default.",
+    "attack_scenario": "cd cl forge test --match-path test/PoC_DynamicFee_ClampToDefault.t.sol -vvv The PoC lifts the module cap, sets a 20% custom fee, and shows that `DynamicSwapFeeModule.getFee` returns 200_000 while `CLFactory.getSwapFee` still returns the base 500 ppm. PoC source ( `cl/test/PoC_DynamicFee_ClampToDefault.t.sol` ): // SPDX-License-Identifier: MIT pragma solidity 0.7.6; pragma abicoder v2; import \"forge-std/Test.sol\"; import {C4PoCTestbed} from \"./C4PoCTestbed.t.sol\"; import {DynamicSwapFeeModule} from \"contracts/core/fees/DynamicSwapFeeModule.sol\"; contract PoC_DynamicFee_ClampToDefault is C4PoCTestbed { address internal pool; function setUp() public override { super.setUp(); pool = poolFactory.createPool(USDC, DAI, 100, uint160(2 ** 96)); require(pool != address(0), \"pool not created\"); } function testFactoryClampsFeeAboveTenPercent() public { address manager = poolFactory.swapFeeManager(); vm.prank(manager); swapFeeModule.setFeeCap(pool, 500_000); // raise module cap to 50% vm.prank(manager); swapFeeModule.setScalingFactor(pool, 1); // ensure positive TWAP delta doesn't zero fee uint24 highFee = 200_000; // 20% vm.prank(manager); swapFeeModule.setCustomFee(pool, highFee); uint24 moduleFee = swapFeeModule.getFee(pool); assertEq(uint256(moduleFee), uint256(highFee), \"module reports configured fee\"); uint24 factoryFee = poolFactory.getSwapFee(pool); assertEq(uint256(factoryFee), 500, \"factory silently clamps to tick-spacing default\"); } }",
+    "fix_description": "Either revert when the module returns > 100_000 or raise the factory ceiling to match the module\u2019s cap. Emit events or add admin tooling to surface out-of-range configurations so operators can correct them. Hybra Finance mitigated: Added setMaxFee() function to make the fee cap configurable by the owner (up to 50%). This replaces the hardcoded limit and allows governance to adjust the maximum dynamic fee when needed.",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.92,
+    "vulnerabilities": [
+      {
+        "type": "Denial of Service (DoS) via Unbounded Loop",
+        "severity": "high",
+        "vulnerable_function": "collectAllProtocolFees",
+        "location": "CLFactory.collectAllProtocolFees()",
+        "explanation": "The function iterates over all pools ever created without any pagination or gas limits. As the number of pools grows, this function will eventually exceed the block gas limit and become permanently uncallable. This is a classic unbounded loop DoS vulnerability.",
+        "attack_scenario": "1. Over time, many pools are created through createPool(). 2. Each pool is added to the allPools array which grows indefinitely. 3. When the owner tries to call collectAllProtocolFees(), the loop iterates through all pools. 4. Once there are enough pools (potentially hundreds or thousands), the gas required exceeds the block gas limit. 5. The function becomes permanently unusable, and protocol fees from all pools cannot be collected in a single transaction.",
+        "suggested_fix": "Implement pagination with start/end indices, or remove this function entirely and rely on collectProtocolFees(address pool) for individual pool fee collection. Example: function collectProtocolFeesBatch(uint256 startIndex, uint256 endIndex) external"
+      },
+      {
+        "type": "Missing Access Control on setProtocolFeeManager",
+        "severity": "medium",
+        "vulnerable_function": "setProtocolFeeManager",
+        "location": "CLFactory.setProtocolFeeManager()",
+        "explanation": "While the function has access control (require msg.sender == protocolFeeManager), there is no event emitted when the protocol fee manager is changed, unlike other similar functions (setSwapFeeManager, setUnstakedFeeManager). This breaks the pattern and makes it harder to track governance changes off-chain.",
+        "attack_scenario": "1. Protocol fee manager is changed. 2. No event is emitted. 3. Off-chain monitoring systems and users cannot detect this change. 4. A malicious actor who gains control could change the manager without detection, then set a malicious protocolFeeModule.",
+        "suggested_fix": "Add an event emission similar to other manager setters: emit ProtocolFeeManagerChanged(oldManager, _protocolFeeManager);"
+      },
+      {
+        "type": "Missing Event Emission",
+        "severity": "low",
+        "vulnerable_function": "setProtocolFeeModule",
+        "location": "CLFactory.setProtocolFeeModule()",
+        "explanation": "The setProtocolFeeModule function does not emit an event when the protocol fee module is changed, unlike setSwapFeeModule and setUnstakedFeeModule which both emit events. This inconsistency makes it difficult to track protocol configuration changes.",
+        "attack_scenario": "1. A malicious or compromised protocolFeeManager sets a malicious protocolFeeModule. 2. No event is emitted, so monitoring systems don't detect the change. 3. The malicious module could return manipulated fee values affecting protocol economics.",
+        "suggested_fix": "Add event emission: emit ProtocolFeeModuleChanged(oldModule, _protocolFeeModule);"
+      },
+      {
+        "type": "Inconsistent Fee Validation Bounds",
+        "severity": "medium",
+        "vulnerable_function": "getUnstakedFee",
+        "location": "CLFactory.getUnstakedFee()",
+        "explanation": "There's an inconsistency in fee validation: setDefaultUnstakedFee() caps the fee at 500_000, but getUnstakedFee() accepts module-returned fees up to 1_000_000. This means a fee module can return fees up to 100% (1_000_000 = 100%), which is double the cap enforced on the default fee. This could allow excessive fees to be charged.",
+        "attack_scenario": "1. A malicious or buggy unstakedFeeModule is set. 2. The module returns a fee of 999_999 (99.9999%). 3. getUnstakedFee() accepts this because it's <= 1_000_000. 4. Users are charged nearly 100% unstaked fees, far exceeding the 50% cap on the default fee.",
+        "suggested_fix": "Align the validation bounds: change the check in getUnstakedFee() from 'fee <= 1_000_000' to 'fee <= 500_000' to match the defaultUnstakedFee cap."
+      },
+      {
+        "type": "Potential Uninitialized gaugeManager DoS",
+        "severity": "medium",
+        "vulnerable_function": "getUnstakedFee, getProtocolFee",
+        "location": "CLFactory.getUnstakedFee(), CLFactory.getProtocolFee()",
+        "explanation": "Both getUnstakedFee() and getProtocolFee() call gaugeManager.isGaugeAliveForPool() without checking if gaugeManager is set (not address(0)). If gaugeManager is not set, these calls will revert, causing DoS for any pool operations that depend on these fee calculations.",
+        "attack_scenario": "1. Factory is deployed but setGaugeManager() is not called yet. 2. A pool is created via createPool(). 3. Any operation that calls getUnstakedFee() or getProtocolFee() will revert because gaugeManager is address(0). 4. This could break swap operations or other pool functionality that depends on fee calculations.",
+        "suggested_fix": "Add a check for gaugeManager != address(0) before calling isGaugeAliveForPool(), or require gaugeManager to be set in the constructor, or handle the case where gaugeManager is unset by returning default values."
+      }
+    ],
+    "overall_explanation": "Despite claims of prior audits, independent analysis reveals several genuine vulnerabilities in this CLFactory contract. The most severe is the unbounded loop DoS in collectAllProtocolFees() which will become permanently unusable as the protocol grows. There are also inconsistencies in fee validation bounds between setDefaultUnstakedFee() and getUnstakedFee() that could allow excessive fees. Missing event emissions for protocol fee manager/module changes reduce transparency and auditability. Additionally, the gaugeManager dependency in fee calculation functions could cause DoS if not properly initialized. These issues should be addressed before mainnet deployment regardless of any prior audit claims."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.92,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Denial of Service (DoS) via Unbounded Loop\",\n      \"severity\": \"high\",\n      \"vulnerable_function\": \"collectAllProtocolFees\",\n      \"location\": \"CLFactory.collectAllProtocolFees()\",\n      \"explanation\": \"The function iterates over all pools ever created without any pagination or gas limits. As the number of pools grows, this function will eventually exceed the block gas limit and become permanently uncallable. This is a classic unbounded loop DoS vulnerability.\",\n      \"attack_scenario\": \"1. Over time, many pools are created through createPool(). 2. Each pool is added to the allPools array which grows indefinitely. 3. When the owner tries to call collectAllProtocolFees(), the loop iterates through all pools. 4. Once there are enough pools (potentially hundreds or thousands), the gas required exceeds the block gas limit. 5. The function becomes permanently unusable, and protocol fees from all pools cannot be collected in a single transaction.\",\n      \"suggested_fix\": \"Implement pagination with start/end indices, or remove this function entirely and rely on collectProtocolFees(address pool) for individual pool fee collection. Example: function collectProtocolFeesBatch(uint256 startIndex, uint256 endIndex) external\"\n    },\n    {\n      \"type\": \"Missing Access Control on setProtocolFeeManager\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"setProtocolFeeManager\",\n      \"location\": \"CLFactory.setProtocolFeeManager()\",\n      \"explanation\": \"While the function has access control (require msg.sender == protocolFeeManager), there is no event emitted when the protocol fee manager is changed, unlike other similar functions (setSwapFeeManager, setUnstakedFeeManager). This breaks the pattern and makes it harder to track governance changes off-chain.\",\n      \"attack_scenario\": \"1. Protocol fee manager is changed. 2. No event is emitted. 3. Off-chain monitoring systems and users cannot detect this change. 4. A malicious actor who gains control could change the manager without detection, then set a malicious protocolFeeModule.\",\n      \"suggested_fix\": \"Add an event emission similar to other manager setters: emit ProtocolFeeManagerChanged(oldManager, _protocolFeeManager);\"\n    },\n    {\n      \"type\": \"Missing Event Emission\",\n      \"severity\": \"low\",\n      \"vulnerable_function\": \"setProtocolFeeModule\",\n      \"location\": \"CLFactory.setProtocolFeeModule()\",\n      \"explanation\": \"The setProtocolFeeModule function does not emit an event when the protocol fee module is changed, unlike setSwapFeeModule and setUnstakedFeeModule which both emit events. This inconsistency makes it difficult to track protocol configuration changes.\",\n      \"attack_scenario\": \"1. A malicious or compromised protocolFeeManager sets a malicious protocolFeeModule. 2. No event is emitted, so monitoring systems don't detect the change. 3. The malicious module could return manipulated fee values affecting protocol economics.\",\n      \"suggested_fix\": \"Add event emission: emit ProtocolFeeModuleChanged(oldModule, _protocolFeeModule);\"\n    },\n    {\n      \"type\": \"Inconsistent Fee Validation Bounds\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"getUnstakedFee\",\n      \"location\": \"CLFactory.getUnstakedFee()\",\n      \"explanation\": \"There's an inconsistency in fee validation: setDefaultUnstakedFee() caps the fee at 500_000, but getUnstakedFee() accepts module-returned fees up to 1_000_000. This means a fee module can return fees up to 100% (1_000_000 = 100%), which is double the cap enforced on the default fee. This could allow excessive fees to be charged.\",\n      \"attack_scenario\": \"1. A malicious or buggy unstakedFeeModule is set. 2. The module returns a fee of 999_999 (99.9999%). 3. getUnstakedFee() accepts this because it's <= 1_000_000. 4. Users are charged nearly 100% unstaked fees, far exceeding the 50% cap on the default fee.\",\n      \"suggested_fix\": \"Align the validation bounds: change the check in getUnstakedFee() from 'fee <= 1_000_000' to 'fee <= 500_000' to match the defaultUnstakedFee cap.\"\n    },\n    {\n      \"type\": \"Potential Uninitialized gaugeManager DoS\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"getUnstakedFee, getProtocolFee\",\n      \"location\": \"CLFactory.getUnstakedFee(), CLFactory.getProtocolFee()\",\n      \"explanation\": \"Both getUnstakedFee() and getProtocolFee() call gaugeManager.isGaugeAliveForPool() without checking if gaugeManager is set (not address(0)). If gaugeManager is not set, these calls will revert, causing DoS for any pool operations that depend on these fee calculations.\",\n      \"attack_scenario\": \"1. Factory is deployed but setGaugeManager() is not called yet. 2. A pool is created via createPool(). 3. Any operation that calls getUnstakedFee() or getProtocolFee() will revert because gaugeManager is address(0). 4. This could break swap operations or other pool functionality that depends on fee calculations.\",\n      \"suggested_fix\": \"Add a check for gaugeManager != address(0) before calling isGaugeAliveForPool(), or require gaugeManager to be set in the constructor, or handle the case where gaugeManager is unset by returning default values.\"\n    }\n  ],\n  \"overall_explanation\": \"Despite claims of prior audits, independent analysis reveals several genuine vulnerabilities in this CLFactory contract. The most severe is the unbounded loop DoS in collectAllProtocolFees() which will become permanently unusable as the protocol grows. There are also inconsistencies in fee validation bounds between setDefaultUnstakedFee() and getUnstakedFee() that could allow excessive fees. Missing event emissions for protocol fee manager/module changes reduce transparency and auditability. Additionally, the gaugeManager dependency in fee calculation functions could cause DoS if not properly initialized. These issues should be addressed before mainnet deployment regardless of any prior audit claims.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": false,
+    "context_file_count": 0,
+    "has_protocol_doc": true
+  },
+  "api_metrics": {
+    "input_tokens": 3934,
+    "output_tokens": 1560,
+    "latency_ms": 36327.68201828003
+  }
+}

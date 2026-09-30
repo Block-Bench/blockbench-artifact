@@ -1,0 +1,51 @@
+{
+  "sample_id": "gs_020",
+  "dataset": "gs",
+  "prompt_type": "context_protocol_cot",
+  "model": "gpt-5.2",
+  "timestamp": "2026-05-25T17:05:20.718020+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "signature_replay",
+    "vulnerable_functions": [
+      "beforeSwap"
+    ],
+    "severity": "medium",
+    "description": "Both UniswapV4KEMHook and PancakeSwapInfinityKEMHook rebuild a quote digest by hashing sender, key, params.zeroForOne, maxAmountIn, maxExchangeRate, exchangeRateDenom, nonce, and expiryTime. The tuple ties the authorization to the router (sender), the full PoolKey (which includes the hook address), trade direction, price and input caps, nonce and expiry. Crucially, no domain separator is folded in: chain ID, deployment salt, and contract identity outside key are absent. If the same hook instance (or the same PoolKey) is deployed on multiple networks, as CREATE3-based salt mining allows, an attacker can lift any valid signature+nonce from chain A and replay it on chain B. Because the digest matches, SignatureChecker.isValidSignatureNow succeeds and the swap executes without the signer's intention. That breaks the core guarantee that signed quotes are single-instance authorizations, allowing cross-chain replay swaps.",
+    "root_cause": "Both UniswapV4KEMHook and PancakeSwapInfinityKEMHook rebuild a quote digest by hashing sender, key, params.zeroForOne, maxAmountIn, maxExchangeRate, exchangeRateDenom, nonce, and expiryTime. The tuple ties the authorization to the router (sender), the full PoolKey (which includes the hook address), trade direction, price and input caps, nonce and expiry. Crucially, no domain separator is folded in: chain ID, deployment salt, and contract identity outside key are absent. If the same hook instance (or the same PoolKey) is deployed on multiple networks, as CREATE3-based salt mining allows, an attacker can lift any valid signature+nonce from chain A and replay it on chain B. Because the digest matches, SignatureChecker.isValidSignatureNow succeeds and the swap executes without the signer's intention. That breaks the core guarantee that signed quotes are single-instance authorizations, allowing cross-chain replay swaps.",
+    "attack_scenario": "1. Kyber deploys UniswapV4KEMHook on Ethereum mainnet with a specific PoolKey\n2. Same hook (or same PoolKey configuration) is deployed on Arbitrum using CREATE3 salt mining to get matching address\n3. User requests a quote on Ethereum, quoteSigner signs: keccak256(abi.encode(sender, key, zeroForOne, maxAmountIn, maxExchangeRate, exchangeRateDenom, nonce, expiryTime))\n4. User broadcasts swap transaction on Ethereum mainnet\n5. Attacker observes the transaction in Ethereum mempool, extracts signature and hookData\n6. Attacker submits identical calldata on Arbitrum before expiryTime\n7. On Arbitrum: sender (router) matches, key matches (same pool configuration), all other parameters match\n8. SignatureChecker.isValidSignatureNow(quoteSigner, digest, signature) returns true\n9. Swap executes on Arbitrum without signer's intention\n10. If nonce != 0, Ethereum swap may still succeed (different nonce storage per chain), causing double execution",
+    "fix_description": "Introduce domain separation for the signed payload in both hooks. Adopt an EIP712 domain that at minimum commits to chainid. This ensures signatures are only valid on the intended chain.",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.9,
+    "vulnerabilities": [
+      {
+        "type": "signature_replay (cross-chain / cross-deployment)",
+        "severity": "medium",
+        "vulnerable_function": "beforeSwap",
+        "location": "UniswapV4KEMHook.beforeSwap",
+        "explanation": "The signed quote digest is computed as keccak256(abi.encode(sender, key, params.zeroForOne, maxAmountIn, maxExchangeRate, exchangeRateDenom, nonce, expiryTime)) with no domain separation (no chainId, no verifying contract address, no protocol/version salt). As a result, the exact same digest can be valid across different chains or different deployments where the same hook instance address and PoolKey can be reproduced (e.g., via CREATE3/CREATE2 salt-mining), and where the same quoteSigner key is used. Nonces are only tracked in this contract\u2019s storage on a per-chain/per-deployment basis, so a nonce consumed on chain A is still unused on chain B, enabling replay. This breaks the intended invariant that a signed quote authorizes a swap only for one specific instance/chain.",
+        "attack_scenario": "1) A user obtains a valid signed quote (hookData including nonce/expiry/signature) intended for chain A.\n2) Attacker deploys (or targets) an identical UniswapV4KEMHook/PoolKey configuration on chain B where quoteSigner is the same address and the hook address/PoolKey match (deterministic deployment can make addresses match across chains).\n3) Before expiry, attacker submits a swap on chain B via PoolManager using the same hookData.\n4) On chain B, _useUnorderedNonce(nonce) succeeds because the nonce hasn\u2019t been used there.\n5) The digest matches and SignatureChecker validates, so the swap executes on chain B without the signer\u2019s intent for that chain.",
+        "suggested_fix": "Add proper domain separation to the signed payload. Prefer EIP-712: define a DOMAIN_SEPARATOR that includes at least chainId and verifyingContract (address(this)) and ideally name/version. Hash typed data, e.g., digest = _hashTypedDataV4(keccak256(abi.encode(QUOTE_TYPEHASH, sender, keyHash, zeroForOne, maxAmountIn, maxExchangeRate, exchangeRateDenom, nonce, expiryTime))). Alternatively (less ideal), include block.chainid and address(this) (and/or poolManager) directly in the abi.encode used for digest."
+      }
+    ],
+    "overall_explanation": "The hook enforces signed quote constraints in beforeSwap and mints \u201cEG\u201d amounts in afterSwap. The core issue is that the quote signature digest lacks domain separation, so a valid signature+nonce can be replayed on another chain/deployment where the same digest can be reconstructed and the nonce is unused, allowing unintended swaps. No other concrete, non-admin exploit paths are evident from the provided code."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.9,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"signature_replay (cross-chain / cross-deployment)\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"beforeSwap\",\n      \"location\": \"UniswapV4KEMHook.beforeSwap\",\n      \"explanation\": \"The signed quote digest is computed as keccak256(abi.encode(sender, key, params.zeroForOne, maxAmountIn, maxExchangeRate, exchangeRateDenom, nonce, expiryTime)) with no domain separation (no chainId, no verifying contract address, no protocol/version salt). As a result, the exact same digest can be valid across different chains or different deployments where the same hook instance address and PoolKey can be reproduced (e.g., via CREATE3/CREATE2 salt-mining), and where the same quoteSigner key is used. Nonces are only tracked in this contract\u2019s storage on a per-chain/per-deployment basis, so a nonce consumed on chain A is still unused on chain B, enabling replay. This breaks the intended invariant that a signed quote authorizes a swap only for one specific instance/chain.\",\n      \"attack_scenario\": \"1) A user obtains a valid signed quote (hookData including nonce/expiry/signature) intended for chain A.\\n2) Attacker deploys (or targets) an identical UniswapV4KEMHook/PoolKey configuration on chain B where quoteSigner is the same address and the hook address/PoolKey match (deterministic deployment can make addresses match across chains).\\n3) Before expiry, attacker submits a swap on chain B via PoolManager using the same hookData.\\n4) On chain B, _useUnorderedNonce(nonce) succeeds because the nonce hasn\u2019t been used there.\\n5) The digest matches and SignatureChecker validates, so the swap executes on chain B without the signer\u2019s intent for that chain.\",\n      \"suggested_fix\": \"Add proper domain separation to the signed payload. Prefer EIP-712: define a DOMAIN_SEPARATOR that includes at least chainId and verifyingContract (address(this)) and ideally name/version. Hash typed data, e.g., digest = _hashTypedDataV4(keccak256(abi.encode(QUOTE_TYPEHASH, sender, keyHash, zeroForOne, maxAmountIn, maxExchangeRate, exchangeRateDenom, nonce, expiryTime))). Alternatively (less ideal), include block.chainid and address(this) (and/or poolManager) directly in the abi.encode used for digest.\"\n    }\n  ],\n  \"overall_explanation\": \"The hook enforces signed quote constraints in beforeSwap and mints \u201cEG\u201d amounts in afterSwap. The core issue is that the quote signature digest lacks domain separation, so a valid signature+nonce can be replayed on another chain/deployment where the same digest can be reconstructed and the nonce is unused, allowing unintended swaps. No other concrete, non-admin exploit paths are evident from the provided code.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": false,
+    "context_file_count": 0,
+    "has_protocol_doc": false
+  },
+  "api_metrics": {
+    "input_tokens": 2631,
+    "output_tokens": 841,
+    "latency_ms": 15698.410034179688
+  }
+}

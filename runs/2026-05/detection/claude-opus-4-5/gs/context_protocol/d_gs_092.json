@@ -1,0 +1,69 @@
+{
+  "sample_id": "gs_092",
+  "dataset": "gs",
+  "prompt_type": "context_protocol",
+  "model": "claude-opus-4-5",
+  "timestamp": "2026-05-25T15:36:22.384676+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "logic_error",
+    "vulnerable_functions": [
+      "setPayoutCalculator"
+    ],
+    "severity": "medium",
+    "description": "Swapping payout calculator during settlement uses new calculator's logic instead of the one active when tickets were purchased.",
+    "root_cause": "Swapping payout calculator during settlement uses new calculator's logic instead of the one active when tickets were purchased.",
+    "attack_scenario": "",
+    "fix_description": "Store active payout calculator in drawing state when initializeJackpot() is called.",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.85,
+    "vulnerabilities": [
+      {
+        "type": "Rounding Error / Precision Loss",
+        "severity": "medium",
+        "vulnerable_function": "_validateAndTrackReferrals",
+        "location": "Jackpot._validateAndTrackReferrals",
+        "explanation": "When distributing referral fees among multiple referrers, each referrer's fee is calculated as `referralFeeTotal * _referralSplit[i] / PRECISE_UNIT`. Due to integer division, the sum of individual referrer fees may be less than the total `referralFeeTotal`. However, the function returns the full `referralFeeTotal` which is then subtracted from `lpEarnings`. This means the contract accounts for more referral fees than are actually distributed, causing a small amount of USDC to become permanently stuck in the contract.",
+        "attack_scenario": "1. User buys tickets worth 1000 USDC with referralFee = 5% (50 USDC total referral fees)\n2. Three referrers with splits: 33.33%, 33.33%, 33.34% (summing to PRECISE_UNIT)\n3. Each referrer gets: 50 * 333300000000000000 / 1e18 = 16.665 USDC (rounded down to 16 USDC each for first two)\n4. Total distributed: 16 + 16 + 16.67 = 48.67 USDC\n5. But lpEarnings is reduced by full 50 USDC\n6. Difference of ~1.33 USDC is stuck in contract\n7. Over many transactions, significant USDC accumulates and is unrecoverable",
+        "suggested_fix": "Track the actual sum of distributed referral fees and return that value instead of the calculated total. Alternatively, give the last referrer the remainder: `uint256 actualDistributed = 0; for(...) { referrerFee = ...; actualDistributed += referrerFee; } return actualDistributed;`"
+      },
+      {
+        "type": "Denial of Service",
+        "severity": "medium",
+        "vulnerable_function": "runJackpot",
+        "location": "Jackpot.runJackpot",
+        "explanation": "The runJackpot function attempts to refund excess ETH to the caller using a low-level call. If the caller is a contract that reverts on receiving ETH (e.g., a contract without a receive/fallback function or one that intentionally reverts), the entire transaction will revert. This prevents the drawing from being executed even though the function is meant to be permissionless.",
+        "attack_scenario": "1. Attacker deploys a contract that calls runJackpot() but has no receive() function or reverts on ETH receipt\n2. Attacker sends slightly more ETH than required for the entropy fee\n3. When runJackpot tries to refund the excess, the call fails\n4. The entire transaction reverts, preventing the drawing\n5. Attacker can repeatedly do this to delay drawings\n6. While others can call runJackpot with exact fee, this creates friction and potential griefing",
+        "suggested_fix": "Use a pull pattern for refunds instead of push. Store excess ETH in a mapping and let users withdraw it separately. Alternatively, don't revert on failed refund: `(bool success,) = payable(msg.sender).call{value: msg.value - fee}(\"\"); // Don't revert if refund fails`"
+      },
+      {
+        "type": "Front-running / MEV",
+        "severity": "medium",
+        "vulnerable_function": "buyTickets",
+        "location": "Jackpot.buyTickets",
+        "explanation": "When a user purchases a ticket that is a duplicate (already purchased by someone else), the prize pool increases by `ticketPrice - edgePerTicket`. This creates an MEV opportunity where a searcher can observe pending ticket purchases in the mempool and front-run them to buy the same numbers first. The front-runner benefits from the increased prize pool when the victim's duplicate purchase goes through, while the victim gets a less favorable position.",
+        "attack_scenario": "1. Victim submits transaction to buy ticket with numbers [1,2,3,4,5] bonusball 3\n2. MEV searcher sees this in mempool\n3. Searcher front-runs with same numbers, becoming the 'original' ticket holder\n4. Victim's transaction executes as duplicate, increasing prize pool\n5. If these numbers win, searcher has better expected value since they bought first\n6. Searcher can systematically extract value from all ticket purchases",
+        "suggested_fix": "Consider implementing commit-reveal scheme for ticket purchases, or use private mempools. Alternatively, make duplicate handling symmetric so there's no advantage to being first."
+      }
+    ],
+    "overall_explanation": "The Jackpot contract implements a lottery system with LP-backed prize pools, NFT tickets, and referral mechanisms. The analysis identified three medium-severity vulnerabilities: (1) Precision loss in referral fee distribution causes small amounts of USDC to become stuck in the contract over time; (2) The ETH refund mechanism in runJackpot can be griefed by contracts that reject ETH transfers; (3) The duplicate ticket mechanism creates MEV opportunities for front-running. The contract has good security practices including reentrancy guards, access controls, and input validation, but these edge cases could impact user experience and cause minor fund losses over time."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.85,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Rounding Error / Precision Loss\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"_validateAndTrackReferrals\",\n      \"location\": \"Jackpot._validateAndTrackReferrals\",\n      \"explanation\": \"When distributing referral fees among multiple referrers, each referrer's fee is calculated as `referralFeeTotal * _referralSplit[i] / PRECISE_UNIT`. Due to integer division, the sum of individual referrer fees may be less than the total `referralFeeTotal`. However, the function returns the full `referralFeeTotal` which is then subtracted from `lpEarnings`. This means the contract accounts for more referral fees than are actually distributed, causing a small amount of USDC to become permanently stuck in the contract.\",\n      \"attack_scenario\": \"1. User buys tickets worth 1000 USDC with referralFee = 5% (50 USDC total referral fees)\\n2. Three referrers with splits: 33.33%, 33.33%, 33.34% (summing to PRECISE_UNIT)\\n3. Each referrer gets: 50 * 333300000000000000 / 1e18 = 16.665 USDC (rounded down to 16 USDC each for first two)\\n4. Total distributed: 16 + 16 + 16.67 = 48.67 USDC\\n5. But lpEarnings is reduced by full 50 USDC\\n6. Difference of ~1.33 USDC is stuck in contract\\n7. Over many transactions, significant USDC accumulates and is unrecoverable\",\n      \"suggested_fix\": \"Track the actual sum of distributed referral fees and return that value instead of the calculated total. Alternatively, give the last referrer the remainder: `uint256 actualDistributed = 0; for(...) { referrerFee = ...; actualDistributed += referrerFee; } return actualDistributed;`\"\n    },\n    {\n      \"type\": \"Denial of Service\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"runJackpot\",\n      \"location\": \"Jackpot.runJackpot\",\n      \"explanation\": \"The runJackpot function attempts to refund excess ETH to the caller using a low-level call. If the caller is a contract that reverts on receiving ETH (e.g., a contract without a receive/fallback function or one that intentionally reverts), the entire transaction will revert. This prevents the drawing from being executed even though the function is meant to be permissionless.\",\n      \"attack_scenario\": \"1. Attacker deploys a contract that calls runJackpot() but has no receive() function or reverts on ETH receipt\\n2. Attacker sends slightly more ETH than required for the entropy fee\\n3. When runJackpot tries to refund the excess, the call fails\\n4. The entire transaction reverts, preventing the drawing\\n5. Attacker can repeatedly do this to delay drawings\\n6. While others can call runJackpot with exact fee, this creates friction and potential griefing\",\n      \"suggested_fix\": \"Use a pull pattern for refunds instead of push. Store excess ETH in a mapping and let users withdraw it separately. Alternatively, don't revert on failed refund: `(bool success,) = payable(msg.sender).call{value: msg.value - fee}(\\\"\\\"); // Don't revert if refund fails`\"\n    },\n    {\n      \"type\": \"Front-running / MEV\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"buyTickets\",\n      \"location\": \"Jackpot.buyTickets\",\n      \"explanation\": \"When a user purchases a ticket that is a duplicate (already purchased by someone else), the prize pool increases by `ticketPrice - edgePerTicket`. This creates an MEV opportunity where a searcher can observe pending ticket purchases in the mempool and front-run them to buy the same numbers first. The front-runner benefits from the increased prize pool when the victim's duplicate purchase goes through, while the victim gets a less favorable position.\",\n      \"attack_scenario\": \"1. Victim submits transaction to buy ticket with numbers [1,2,3,4,5] bonusball 3\\n2. MEV searcher sees this in mempool\\n3. Searcher front-runs with same numbers, becoming the 'original' ticket holder\\n4. Victim's transaction executes as duplicate, increasing prize pool\\n5. If these numbers win, searcher has better expected value since they bought first\\n6. Searcher can systematically extract value from all ticket purchases\",\n      \"suggested_fix\": \"Consider implementing commit-reveal scheme for ticket purchases, or use private mempools. Alternatively, make duplicate handling symmetric so there's no advantage to being first.\"\n    }\n  ],\n  \"overall_explanation\": \"The Jackpot contract implements a lottery system with LP-backed prize pools, NFT tickets, and referral mechanisms. The analysis identified three medium-severity vulnerabilities: (1) Precision loss in referral fee distribution causes small amounts of USDC to become stuck in the contract over time; (2) The ETH refund mechanism in runJackpot can be griefed by contracts that reject ETH transfers; (3) The duplicate ticket mechanism creates MEV opportunities for front-running. The contract has good security practices including reentrancy guards, access controls, and input validation, but these edge cases could impact user experience and cause minor fund losses over time.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": false,
+    "context_file_count": 0,
+    "has_protocol_doc": false
+  },
+  "api_metrics": {
+    "input_tokens": 22981,
+    "output_tokens": 1355,
+    "latency_ms": 27494.549989700317
+  }
+}

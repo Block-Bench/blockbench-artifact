@@ -1,0 +1,67 @@
+{
+  "sample_id": "tr_tc_016",
+  "variant": "trojan",
+  "model": "gpt-5.2",
+  "prompt_type": "direct",
+  "timestamp": "2026-01-05T04:20:21.693067+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "validation_bypass",
+    "vulnerable_function": "deposit",
+    "vulnerable_lines": [
+      67
+    ],
+    "severity": ""
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.93,
+    "vulnerabilities": [
+      {
+        "type": "Missing access control enables arbitrary token/allowance draining via forged deposits",
+        "severity": "critical",
+        "vulnerable_lines": [
+          79,
+          80,
+          81,
+          83,
+          84,
+          93,
+          100,
+          101
+        ],
+        "location": "BridgeHandler.deposit() + BridgeHandler.setResource()",
+        "explanation": "BridgeHandler.deposit() is externally callable by anyone and accepts an arbitrary `depositer` address instead of using `msg.sender` (/*LN-79*/-/*LN-83*/, /*LN-81*/). Additionally, setResource() has no access control (/*LN-100*/-/*LN-101*/), allowing any attacker to map any resourceID to any ERC20 token address. Because deposit() then calls IERC20(tokenContract).transferFrom(depositer, address(this), amount) (/*LN-93*/), an attacker can pull tokens from any victim who has approved the handler for that token (common for bridges), without the victim calling the bridge.",
+        "attack_scenario": "1) Attacker identifies a victim who previously approved BridgeHandler to spend Token T (e.g., unlimited allowance).\n2) Attacker calls setResource(resourceID, address(T)) to point a chosen resourceID to Token T.\n3) Attacker calls BridgeHandler.deposit(resourceID, victim, abi.encode(amount)).\n4) transferFrom(victim, handler, amount) executes using the victim\u2019s existing allowance, moving the victim\u2019s tokens into the handler contract.\n5) Victim\u2019s funds are stolen/locked in the handler without any action from the victim.",
+        "suggested_fix": "Add strict access control:\n- Restrict setResource() (and toggleZeroCheckBypass()) to an admin role (e.g., Ownable/AccessControl).\n- Restrict deposit() so only the CrossChainBridge (or a trusted bridge contract) can call it (e.g., `require(msg.sender == bridge)`), and/or require `depositer == msg.sender` to prevent forging.\n- Consider per-resource configuration immutability or timelocked updates."
+      },
+      {
+        "type": "Bridging without locking funds (unchecked ERC20 return + attacker-controlled resource mapping)",
+        "severity": "critical",
+        "vulnerable_lines": [
+          42,
+          44,
+          84,
+          93,
+          100,
+          101
+        ],
+        "location": "CrossChainBridge.deposit() -> BridgeHandler.deposit()",
+        "explanation": "Because setResource() is permissionless (/*LN-100*/-/*LN-101*/), an attacker can map a resourceID to a malicious \u201cERC20\u201d contract. BridgeHandler.deposit() does not check the return value of transferFrom (/*LN-93*/), and CrossChainBridge emits the Deposit event regardless of whether tokens were actually transferred/locked (/*LN-42*/-/*LN-44*/). A malicious token can return `true` while transferring nothing, causing deposits to appear valid to off-chain relayers/indexers that mint/release assets on the destination chain based on the event.",
+        "attack_scenario": "1) Attacker deploys a fake ERC20 that implements transferFrom() to always return true and not transfer tokens.\n2) Attacker calls setResource(resourceID, address(fakeToken)).\n3) Attacker calls CrossChainBridge.deposit(destinationDomainID, resourceID, abi.encode(largeAmount)).\n4) Handler calls fakeToken.transferFrom(attacker, handler, largeAmount) which returns true but moves no tokens.\n5) CrossChainBridge still emits Deposit event with incremented nonce.\n6) If the bridge/relayer mints/releases on the destination chain based on the event, attacker receives real bridged assets without locking funds on the source chain.",
+        "suggested_fix": "1) Add access control to setResource() so attackers cannot point resourceIDs to arbitrary contracts.\n2) Use SafeERC20 and require success: `SafeERC20.safeTransferFrom(...)` or `require(IERC20(token).transferFrom(...) , \"transfer failed\")`.\n3) Validate `tokenContract != address(0)` and optionally verify tokenContract is expected (codehash/allowlist).\n4) Consider emitting deposit events only after verified asset movement and/or tracking locked balances."
+      }
+    ],
+    "overall_explanation": "The core issues are (1) missing access control on BridgeHandler.setResource() (and related config) and (2) an externally callable BridgeHandler.deposit() that allows forging the `depositer` address. Together, these enable direct theft from any user who has approved the handler, and also allow \u201cdeposits\u201d that emit valid-looking events without actually locking funds (via malicious tokens and unchecked transferFrom return values). These are critical, permissionless attack paths."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.93,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Missing access control enables arbitrary token/allowance draining via forged deposits\",\n      \"severity\": \"critical\",\n      \"vulnerable_lines\": [79, 80, 81, 83, 84, 93, 100, 101],\n      \"location\": \"BridgeHandler.deposit() + BridgeHandler.setResource()\",\n      \"explanation\": \"BridgeHandler.deposit() is externally callable by anyone and accepts an arbitrary `depositer` address instead of using `msg.sender` (/*LN-79*/-/*LN-83*/, /*LN-81*/). Additionally, setResource() has no access control (/*LN-100*/-/*LN-101*/), allowing any attacker to map any resourceID to any ERC20 token address. Because deposit() then calls IERC20(tokenContract).transferFrom(depositer, address(this), amount) (/*LN-93*/), an attacker can pull tokens from any victim who has approved the handler for that token (common for bridges), without the victim calling the bridge.\",\n      \"attack_scenario\": \"1) Attacker identifies a victim who previously approved BridgeHandler to spend Token T (e.g., unlimited allowance).\\n2) Attacker calls setResource(resourceID, address(T)) to point a chosen resourceID to Token T.\\n3) Attacker calls BridgeHandler.deposit(resourceID, victim, abi.encode(amount)).\\n4) transferFrom(victim, handler, amount) executes using the victim\u2019s existing allowance, moving the victim\u2019s tokens into the handler contract.\\n5) Victim\u2019s funds are stolen/locked in the handler without any action from the victim.\",\n      \"suggested_fix\": \"Add strict access control:\\n- Restrict setResource() (and toggleZeroCheckBypass()) to an admin role (e.g., Ownable/AccessControl).\\n- Restrict deposit() so only the CrossChainBridge (or a trusted bridge contract) can call it (e.g., `require(msg.sender == bridge)`), and/or require `depositer == msg.sender` to prevent forging.\\n- Consider per-resource configuration immutability or timelocked updates.\"\n    },\n    {\n      \"type\": \"Bridging without locking funds (unchecked ERC20 return + attacker-controlled resource mapping)\",\n      \"severity\": \"critical\",\n      \"vulnerable_lines\": [42, 44, 84, 93, 100, 101],\n      \"location\": \"CrossChainBridge.deposit() -> BridgeHandler.deposit()\",\n      \"explanation\": \"Because setResource() is permissionless (/*LN-100*/-/*LN-101*/), an attacker can map a resourceID to a malicious \u201cERC20\u201d contract. BridgeHandler.deposit() does not check the return value of transferFrom (/*LN-93*/), and CrossChainBridge emits the Deposit event regardless of whether tokens were actually transferred/locked (/*LN-42*/-/*LN-44*/). A malicious token can return `true` while transferring nothing, causing deposits to appear valid to off-chain relayers/indexers that mint/release assets on the destination chain based on the event.\",\n      \"attack_scenario\": \"1) Attacker deploys a fake ERC20 that implements transferFrom() to always return true and not transfer tokens.\\n2) Attacker calls setResource(resourceID, address(fakeToken)).\\n3) Attacker calls CrossChainBridge.deposit(destinationDomainID, resourceID, abi.encode(largeAmount)).\\n4) Handler calls fakeToken.transferFrom(attacker, handler, largeAmount) which returns true but moves no tokens.\\n5) CrossChainBridge still emits Deposit event with incremented nonce.\\n6) If the bridge/relayer mints/releases on the destination chain based on the event, attacker receives real bridged assets without locking funds on the source chain.\",\n      \"suggested_fix\": \"1) Add access control to setResource() so attackers cannot point resourceIDs to arbitrary contracts.\\n2) Use SafeERC20 and require success: `SafeERC20.safeTransferFrom(...)` or `require(IERC20(token).transferFrom(...) , \\\"transfer failed\\\")`.\\n3) Validate `tokenContract != address(0)` and optionally verify tokenContract is expected (codehash/allowlist).\\n4) Consider emitting deposit events only after verified asset movement and/or tracking locked balances.\"\n    }\n  ],\n  \"overall_explanation\": \"The core issues are (1) missing access control on BridgeHandler.setResource() (and related config) and (2) an externally callable BridgeHandler.deposit() that allows forging the `depositer` address. Together, these enable direct theft from any user who has approved the handler, and also allow \u201cdeposits\u201d that emit valid-looking events without actually locking funds (via malicious tokens and unchecked transferFrom return values). These are critical, permissionless attack paths.\"\n}\n```"
+  },
+  "api_metrics": {
+    "input_tokens": 2376,
+    "output_tokens": 1877,
+    "latency_ms": 40247.77817726135
+  }
+}

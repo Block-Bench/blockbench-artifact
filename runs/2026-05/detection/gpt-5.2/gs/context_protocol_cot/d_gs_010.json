@@ -1,0 +1,51 @@
+{
+  "sample_id": "gs_010",
+  "dataset": "gs",
+  "prompt_type": "context_protocol_cot",
+  "model": "gpt-5.2",
+  "timestamp": "2026-05-25T17:01:30.013462+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "flash_loan",
+    "vulnerable_functions": [
+      "isGranted"
+    ],
+    "severity": "high",
+    "description": "The MinVotingPowerCondition contract allows any users who hold at least plugin.minProposerVotingPower() amount of tokens (locked in the LockManager or in their token balance) to create a proposal and execute LockToVote.createProposal. This logic can be easily bypassed if the token allows flashloan or flashmint. Given that isGranted checks the user's token balance (line 45: token.balanceOf(_who) + lockManager.getLockedBalance(_who)), the user does not even need to lock the flashloaned amount into the LockManager to be able to create and spam proposals.",
+    "root_cause": "The MinVotingPowerCondition contract allows any users who hold at least plugin.minProposerVotingPower() amount of tokens (locked in the LockManager or in their token balance) to create a proposal and execute LockToVote.createProposal. This logic can be easily bypassed if the token allows flashloan or flashmint. Given that isGranted checks the user's token balance (line 45: token.balanceOf(_who) + lockManager.getLockedBalance(_who)), the user does not even need to lock the flashloaned amount into the LockManager to be able to create and spam proposals.",
+    "attack_scenario": "1. Flashloan the token.\n2. Create the proposal (isGranted passes because token.balanceOf includes flashloaned amount).\n3. Lock + vote the proposal and auto-execute it (EarlyExecution).\n4. Unlock the tokens.\n5. Repay the flashloan.\nAll in the very same transaction.",
+    "fix_description": "Avoid using the token's balance and require the user to only use the locked amount. Change line 45 from 'token.balanceOf(_who) + lockManager.getLockedBalance(_who)' to just 'lockManager.getLockedBalance(_who)'. Store the proposal's creator in the proposal struct and require that the locked amount required to create the proposal won't be unlockable until the proposal ends.",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.91,
+    "vulnerabilities": [
+      {
+        "type": "flash_loan / transient balance bypass (authorization)",
+        "severity": "high",
+        "vulnerable_function": "isGranted",
+        "location": "MinVotingPowerCondition.isGranted",
+        "explanation": "The contract is intended to restrict proposal creation to accounts with at least `plugin.minProposerVotingPower()` of voting power. However, `isGranted` authorizes based on `token.balanceOf(_who) + lockManager.getLockedBalance(_who)`. If the governance token supports flashloan/flashmint (or any mechanism to obtain a large temporary balance within one transaction), an attacker can satisfy the threshold using a transient balance that does not represent sustained voting power or locked stake. Because the check reads the live ERC20 balance, the attacker does not need to lock tokens in `lockManager` at all; the permission can be passed during the flashloan callback and then the balance can be returned before the transaction ends. This enables permission bypass for proposal creation (and potentially spam / governance manipulation depending on the downstream plugin\u2019s proposal/execution rules).",
+        "attack_scenario": "1) Attacker takes a flashloan/flashmints enough governance tokens to exceed `minProposerVotingPower`.\n2) In the flashloan callback (same transaction), attacker calls the plugin function gated by this condition (e.g., create proposal).\n3) `isGranted` evaluates `token.balanceOf(attacker)` including the flashloaned tokens and returns true.\n4) Attacker finalizes any additional actions allowed immediately after proposal creation (e.g., if early execution paths exist).\n5) Attacker repays the flashloan/undoes flashmint, ending the transaction with no lasting stake but having created (or advanced) the proposal.",
+        "suggested_fix": "Do not use live ERC20 balance for proposer eligibility. Require durable voting power, e.g.:\n- Use only locked stake: `uint256 current = lockManager.getLockedBalance(_who);`\n- Or use snapshot-based voting power (ERC20Votes / token.getPastVotes) at a well-defined block.\nAdditionally, if proposer stake must remain at risk, store proposal creator and enforce a non-unlockable lock (or minimum locked balance) until proposal expiry/execution."
+      }
+    ],
+    "overall_explanation": "The contract\u2019s sole authorization check relies on the caller\u2019s instantaneous ERC20 balance plus locked balance. This deviates from the likely intent of requiring sustained voting power/commitment, and can be bypassed with flashloan/flashmint-capable tokens to obtain temporary balance and pass `isGranted` within a single transaction. This enables unauthorized proposal creation and potential governance spam/manipulation depending on downstream execution mechanics."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.91,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"flash_loan / transient balance bypass (authorization)\",\n      \"severity\": \"high\",\n      \"vulnerable_function\": \"isGranted\",\n      \"location\": \"MinVotingPowerCondition.isGranted\",\n      \"explanation\": \"The contract is intended to restrict proposal creation to accounts with at least `plugin.minProposerVotingPower()` of voting power. However, `isGranted` authorizes based on `token.balanceOf(_who) + lockManager.getLockedBalance(_who)`. If the governance token supports flashloan/flashmint (or any mechanism to obtain a large temporary balance within one transaction), an attacker can satisfy the threshold using a transient balance that does not represent sustained voting power or locked stake. Because the check reads the live ERC20 balance, the attacker does not need to lock tokens in `lockManager` at all; the permission can be passed during the flashloan callback and then the balance can be returned before the transaction ends. This enables permission bypass for proposal creation (and potentially spam / governance manipulation depending on the downstream plugin\u2019s proposal/execution rules).\",\n      \"attack_scenario\": \"1) Attacker takes a flashloan/flashmints enough governance tokens to exceed `minProposerVotingPower`.\\n2) In the flashloan callback (same transaction), attacker calls the plugin function gated by this condition (e.g., create proposal).\\n3) `isGranted` evaluates `token.balanceOf(attacker)` including the flashloaned tokens and returns true.\\n4) Attacker finalizes any additional actions allowed immediately after proposal creation (e.g., if early execution paths exist).\\n5) Attacker repays the flashloan/undoes flashmint, ending the transaction with no lasting stake but having created (or advanced) the proposal.\",\n      \"suggested_fix\": \"Do not use live ERC20 balance for proposer eligibility. Require durable voting power, e.g.:\\n- Use only locked stake: `uint256 current = lockManager.getLockedBalance(_who);`\\n- Or use snapshot-based voting power (ERC20Votes / token.getPastVotes) at a well-defined block.\\nAdditionally, if proposer stake must remain at risk, store proposal creator and enforce a non-unlockable lock (or minimum locked balance) until proposal expiry/execution.\"\n    }\n  ],\n  \"overall_explanation\": \"The contract\u2019s sole authorization check relies on the caller\u2019s instantaneous ERC20 balance plus locked balance. This deviates from the likely intent of requiring sustained voting power/commitment, and can be bypassed with flashloan/flashmint-capable tokens to obtain temporary balance and pass `isGranted` within a single transaction. This enables unauthorized proposal creation and potential governance spam/manipulation depending on downstream execution mechanics.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": false,
+    "context_file_count": 0,
+    "has_protocol_doc": false
+  },
+  "api_metrics": {
+    "input_tokens": 1676,
+    "output_tokens": 749,
+    "latency_ms": 13685.202836990356
+  }
+}

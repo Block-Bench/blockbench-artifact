@@ -1,0 +1,60 @@
+{
+  "sample_id": "gs_016",
+  "dataset": "gs",
+  "prompt_type": "direct",
+  "model": "gemini-3-pro-hyper-extended",
+  "timestamp": "2026-01-05T13:14:26.809167+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "logic_error",
+    "vulnerable_functions": [
+      "isGranted"
+    ],
+    "severity": "medium",
+    "description": "In MinVotingPowerCondition.isGranted() at line 45, the function checks 'token.balanceOf(_who) + lockManager.getLockedBalance(_who)'. If an address holds tokens but can't spend them due to being frozen or blacklisted (like USDC/USDT blacklist), they are still granted access to create proposals. The intended behavior should be to not allow calling createProposal as the tokens are not actually transferable.",
+    "root_cause": "In MinVotingPowerCondition.isGranted() at line 45, the function checks 'token.balanceOf(_who) + lockManager.getLockedBalance(_who)'. If an address holds tokens but can't spend them due to being frozen or blacklisted (like USDC/USDT blacklist), they are still granted access to create proposals. The intended behavior should be to not allow calling createProposal as the tokens are not actually transferable.",
+    "attack_scenario": "1. User holds 1000 USDC but is blacklisted by Circle.\n2. User cannot actually transfer or lock their tokens.\n3. User calls createProposal().\n4. isGranted() at line 45 checks token.balanceOf(user) which returns 1000.\n5. User passes the minProposerVotingPower check despite having unusable tokens.\n6. User can spam create proposals without genuine stake in governance.",
+    "fix_description": "Do not use token.balanceOf(_who), rather actually require the tokens to be locked in LockManager by making a transfer. Only check lockManager.getLockedBalance(_who) for voting power, removing the token.balanceOf() portion.",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.95,
+    "vulnerabilities": [
+      {
+        "type": "Flash Loan Governance Bypass",
+        "severity": "high",
+        "vulnerable_function": "isGranted",
+        "location": "MinVotingPowerCondition.sol",
+        "explanation": "The `isGranted` function calculates voting power using the current spot balance: `token.balanceOf(_who) + lockManager.getLockedBalance(_who)`. This allows an attacker to use a flash loan to temporarily acquire a large amount of tokens, meet the `minProposerVotingPower` threshold, execute a privileged action (like creating a proposal), and repay the loan in the same transaction. This completely bypasses the intended 'skin in the game' requirement for governance participation.",
+        "attack_scenario": "1. Attacker identifies a lending pool for the governance token.\n2. Attacker borrows an amount of tokens greater than `minProposerVotingPower` via a flash loan.\n3. Attacker calls the governance function protected by this condition (e.g., `createProposal`).\n4. `MinVotingPowerCondition.isGranted` checks `token.balanceOf(attacker)`, which is now high. The check passes.\n5. The proposal is created.\n6. Attacker repays the flash loan.\n7. Result: Attacker created a proposal without holding any tokens long-term.",
+        "suggested_fix": "Do not use current `balanceOf` for governance permissions. Instead, use a historical checkpoint system. If the token supports `ERC20Votes`, use `getPastVotes(_who, block.number - 1)`. If the token is a standard ERC20, the system must enforce that tokens are locked in the `LockManager` for at least one block before they count towards the threshold, and `isGranted` should only check `lockManager.getLockedBalance`."
+      },
+      {
+        "type": "Denial of Service (DoS) via Proposal Spam",
+        "severity": "medium",
+        "vulnerable_function": "_withdrawActiveVotingPower",
+        "location": "LockManagerBase.sol (Context)",
+        "explanation": "The `LockManagerBase` contract (used by the main contract) tracks all active proposals in `knownProposalIds`. The `unlock` function iterates over this entire set in `_withdrawActiveVotingPower` to clear votes. Because the `MinVotingPowerCondition` allows cheap proposal creation via flash loans (see above), an attacker can spam hundreds of proposals. This bloats the `knownProposalIds` array, causing the `unlock` function to exceed the block gas limit due to the O(N) loop with external calls.",
+        "attack_scenario": "1. Attacker exploits the Flash Loan vulnerability to create 500+ proposals cheaply.\n2. Each proposal is added to `knownProposalIds` in the `LockManager`.\n3. A legitimate user tries to call `unlock()` to retrieve their tokens.\n4. `unlock()` calls `_withdrawActiveVotingPower()`, which loops through all 500+ proposals, making external calls for each.\n5. The transaction runs out of gas, permanently locking the user's funds until proposals expire and are manually cleaned up.",
+        "suggested_fix": "Fix the root cause in `MinVotingPowerCondition` to prevent spam. Additionally, optimize `LockManagerBase` to avoid iterating over all global proposals for every user unlock, perhaps by tracking user-specific participation or limiting the number of active proposals."
+      }
+    ],
+    "overall_explanation": "The `MinVotingPowerCondition` contract is critically vulnerable to flash loan attacks because it relies on the current token balance (`balanceOf`) to grant permissions. This allows attackers to bypass governance thresholds and spam proposals. This spamming capability exacerbates a design flaw in the associated `LockManagerBase` contract, where iterating over all active proposals during an unlock operation can lead to a Denial of Service (DoS) and fund locking due to gas limits."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.95,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Flash Loan Governance Bypass\",\n      \"severity\": \"high\",\n      \"vulnerable_function\": \"isGranted\",\n      \"location\": \"MinVotingPowerCondition.sol\",\n      \"explanation\": \"The `isGranted` function calculates voting power using the current spot balance: `token.balanceOf(_who) + lockManager.getLockedBalance(_who)`. This allows an attacker to use a flash loan to temporarily acquire a large amount of tokens, meet the `minProposerVotingPower` threshold, execute a privileged action (like creating a proposal), and repay the loan in the same transaction. This completely bypasses the intended 'skin in the game' requirement for governance participation.\",\n      \"attack_scenario\": \"1. Attacker identifies a lending pool for the governance token.\\n2. Attacker borrows an amount of tokens greater than `minProposerVotingPower` via a flash loan.\\n3. Attacker calls the governance function protected by this condition (e.g., `createProposal`).\\n4. `MinVotingPowerCondition.isGranted` checks `token.balanceOf(attacker)`, which is now high. The check passes.\\n5. The proposal is created.\\n6. Attacker repays the flash loan.\\n7. Result: Attacker created a proposal without holding any tokens long-term.\",\n      \"suggested_fix\": \"Do not use current `balanceOf` for governance permissions. Instead, use a historical checkpoint system. If the token supports `ERC20Votes`, use `getPastVotes(_who, block.number - 1)`. If the token is a standard ERC20, the system must enforce that tokens are locked in the `LockManager` for at least one block before they count towards the threshold, and `isGranted` should only check `lockManager.getLockedBalance`.\"\n    },\n    {\n      \"type\": \"Denial of Service (DoS) via Proposal Spam\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"_withdrawActiveVotingPower\",\n      \"location\": \"LockManagerBase.sol (Context)\",\n      \"explanation\": \"The `LockManagerBase` contract (used by the main contract) tracks all active proposals in `knownProposalIds`. The `unlock` function iterates over this entire set in `_withdrawActiveVotingPower` to clear votes. Because the `MinVotingPowerCondition` allows cheap proposal creation via flash loans (see above), an attacker can spam hundreds of proposals. This bloats the `knownProposalIds` array, causing the `unlock` function to exceed the block gas limit due to the O(N) loop with external calls.\",\n      \"attack_scenario\": \"1. Attacker exploits the Flash Loan vulnerability to create 500+ proposals cheaply.\\n2. Each proposal is added to `knownProposalIds` in the `LockManager`.\\n3. A legitimate user tries to call `unlock()` to retrieve their tokens.\\n4. `unlock()` calls `_withdrawActiveVotingPower()`, which loops through all 500+ proposals, making external calls for each.\\n5. The transaction runs out of gas, permanently locking the user's funds until proposals expire and are manually cleaned up.\",\n      \"suggested_fix\": \"Fix the root cause in `MinVotingPowerCondition` to prevent spam. Additionally, optimize `LockManagerBase` to avoid iterating over all global proposals for every user unlock, perhaps by tracking user-specific participation or limiting the number of active proposals.\"\n    }\n  ],\n  \"overall_explanation\": \"The `MinVotingPowerCondition` contract is critically vulnerable to flash loan attacks because it relies on the current token balance (`balanceOf`) to grant permissions. This allows attackers to bypass governance thresholds and spam proposals. This spamming capability exacerbates a design flaw in the associated `LockManagerBase` contract, where iterating over all active proposals during an unlock operation can lead to a Denial of Service (DoS) and fund locking due to gas limits.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": true,
+    "context_file_count": 1,
+    "has_protocol_doc": false
+  },
+  "api_metrics": {
+    "input_tokens": 3635,
+    "output_tokens": 9248,
+    "latency_ms": 94286.84782981873
+  }
+}

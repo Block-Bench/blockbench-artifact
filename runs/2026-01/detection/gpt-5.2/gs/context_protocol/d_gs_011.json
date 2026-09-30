@@ -1,0 +1,51 @@
+{
+  "sample_id": "gs_011",
+  "dataset": "gs",
+  "prompt_type": "context_protocol",
+  "model": "gpt-5.2",
+  "timestamp": "2026-01-05T13:53:54.221599+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "flash_loan",
+    "vulnerable_functions": [
+      "vote"
+    ],
+    "severity": "high",
+    "description": "If the token used by the LockManager can be flashloaned (or flashminted) and a proposal is created with the voting mode EarlyExecution, anyone could be able to 'early execute' it by flashloaning tokens, locking them, casting a YES vote to trigger early execution, unlocking tokens, and repaying the flashloan - all in one transaction. The vulnerable code is in LockToVotePlugin.vote() at lines 205-207 which calls _attemptEarlyExecution() when VotingMode.EarlyExecution is set.",
+    "root_cause": "If the token used by the LockManager can be flashloaned (or flashminted) and a proposal is created with the voting mode EarlyExecution, anyone could be able to 'early execute' it by flashloaning tokens, locking them, casting a YES vote to trigger early execution, unlocking tokens, and repaying the flashloan - all in one transaction. The vulnerable code is in LockToVotePlugin.vote() at lines 205-207 which calls _attemptEarlyExecution() when VotingMode.EarlyExecution is set.",
+    "attack_scenario": "1. Flashloan the needed amount.\n2. Lock the flashloaned amount via LockManager.lock().\n3. Cast a 'YES' vote via LockManager.vote() which triggers LockToVotePlugin._attemptEarlyExecution().\n4. Proposal executes immediately in same transaction.\n5. Unlock the tokens via LockManager.unlock().\n6. Repay the flashloan.",
+    "fix_description": "Avoid allowing the early execution in the very same block that the vote has been made. This would require tracking the 'success' of a proposal in a separate flag, stored in the proposal struct. Alternatively, remove the EarlyExecution voting mode entirely.",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.86,
+    "vulnerabilities": [
+      {
+        "type": "Denial of service (unbounded iteration) leading to inability to unlock locked tokens",
+        "severity": "high",
+        "vulnerable_function": "_withdrawActiveVotingPower() (called by unlock())",
+        "location": "LockManagerBase._withdrawActiveVotingPower / LockManagerBase.unlock",
+        "explanation": "LockManagerBase maintains a GLOBAL EnumerableSet of `knownProposalIds` (all proposals ever created and not yet removed). On `unlock()`, it iterates over the entire set to (a) remove ended proposals and (b) clear the caller\u2019s votes on still-open proposals. Because defeated/expired proposals are not removed by the plugin (only `_execute()` calls `proposalEnded()`), the set can grow without bound and relies on user unlocks to garbage-collect. This makes `unlock()` O(N) in total proposals, not O(#proposals the user voted on). An attacker who can create many proposals can push `knownProposalIds.length()` high enough that `unlock()` exceeds the block gas limit, permanently preventing users from unlocking and effectively freezing their funds in the LockManager.",
+        "attack_scenario": "1) Attacker obtains/has CREATE_PROPOSAL permission (commonly granted broadly to token holders in DAOs).\n2) Attacker repeatedly calls LockToVotePlugin.createProposal(...) to create a very large number of proposals (even with minimal/empty actions if allowed), causing LockManagerBase.knownProposalIds to grow.\n3) Many proposals eventually expire without execution (no `proposalEnded()` call), so they remain in `knownProposalIds`.\n4) Any user calling LockManager.unlock() triggers `_withdrawActiveVotingPower()`, which loops over the entire `knownProposalIds` set; once the set is large enough, the call runs out of gas / exceeds block gas limit and reverts.\n5) Users cannot unlock their tokens (funds stuck), regardless of their own voting activity.",
+        "suggested_fix": "Avoid global unbounded iteration on user exit paths:\n- Track per-user active-vote proposal IDs (only proposals the user has voted on), and iterate over that small set during unlock.\n- Add explicit, permissionless garbage-collection methods with pagination (e.g., `cleanupProposals(uint256[] ids)` or `cleanup(uint256 max)`), so anyone can remove ended proposals without forcing unlock() to do it.\n- Ensure the plugin calls `lockManager.proposalEnded(proposalId)` for all terminal outcomes (executed AND defeated/expired), or provide an external `finalize(proposalId)` that does so.\n- Consider capping active proposals or requiring an economic cost (bond) to create proposals to limit spam."
+      }
+    ],
+    "overall_explanation": "Core voting logic is mostly permission-gated via the DAO and LockManager. However, the LockManager\u2019s global tracking of proposal IDs creates an unbounded loop in `unlock()`, allowing proposal spam (by any account able to create proposals) to make unlocking exceed the block gas limit, freezing locked funds. This is a concrete, non-admin-dependent DoS risk in typical governance configurations where proposal creation is broadly accessible."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.86,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Denial of service (unbounded iteration) leading to inability to unlock locked tokens\",\n      \"severity\": \"high\",\n      \"vulnerable_function\": \"_withdrawActiveVotingPower() (called by unlock())\",\n      \"location\": \"LockManagerBase._withdrawActiveVotingPower / LockManagerBase.unlock\",\n      \"explanation\": \"LockManagerBase maintains a GLOBAL EnumerableSet of `knownProposalIds` (all proposals ever created and not yet removed). On `unlock()`, it iterates over the entire set to (a) remove ended proposals and (b) clear the caller\u2019s votes on still-open proposals. Because defeated/expired proposals are not removed by the plugin (only `_execute()` calls `proposalEnded()`), the set can grow without bound and relies on user unlocks to garbage-collect. This makes `unlock()` O(N) in total proposals, not O(#proposals the user voted on). An attacker who can create many proposals can push `knownProposalIds.length()` high enough that `unlock()` exceeds the block gas limit, permanently preventing users from unlocking and effectively freezing their funds in the LockManager.\",\n      \"attack_scenario\": \"1) Attacker obtains/has CREATE_PROPOSAL permission (commonly granted broadly to token holders in DAOs).\\n2) Attacker repeatedly calls LockToVotePlugin.createProposal(...) to create a very large number of proposals (even with minimal/empty actions if allowed), causing LockManagerBase.knownProposalIds to grow.\\n3) Many proposals eventually expire without execution (no `proposalEnded()` call), so they remain in `knownProposalIds`.\\n4) Any user calling LockManager.unlock() triggers `_withdrawActiveVotingPower()`, which loops over the entire `knownProposalIds` set; once the set is large enough, the call runs out of gas / exceeds block gas limit and reverts.\\n5) Users cannot unlock their tokens (funds stuck), regardless of their own voting activity.\",\n      \"suggested_fix\": \"Avoid global unbounded iteration on user exit paths:\\n- Track per-user active-vote proposal IDs (only proposals the user has voted on), and iterate over that small set during unlock.\\n- Add explicit, permissionless garbage-collection methods with pagination (e.g., `cleanupProposals(uint256[] ids)` or `cleanup(uint256 max)`), so anyone can remove ended proposals without forcing unlock() to do it.\\n- Ensure the plugin calls `lockManager.proposalEnded(proposalId)` for all terminal outcomes (executed AND defeated/expired), or provide an external `finalize(proposalId)` that does so.\\n- Consider capping active proposals or requiring an economic cost (bond) to create proposals to limit spam.\"\n    }\n  ],\n  \"overall_explanation\": \"Core voting logic is mostly permission-gated via the DAO and LockManager. However, the LockManager\u2019s global tracking of proposal IDs creates an unbounded loop in `unlock()`, allowing proposal spam (by any account able to create proposals) to make unlocking exceed the block gas limit, freezing locked funds. This is a concrete, non-admin-dependent DoS risk in typical governance configurations where proposal creation is broadly accessible.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": true,
+    "context_file_count": 2,
+    "has_protocol_doc": true
+  },
+  "api_metrics": {
+    "input_tokens": 9102,
+    "output_tokens": 2439,
+    "latency_ms": 52253.275871276855
+  }
+}

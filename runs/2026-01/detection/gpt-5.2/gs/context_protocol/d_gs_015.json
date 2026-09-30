@@ -1,0 +1,60 @@
+{
+  "sample_id": "gs_015",
+  "dataset": "gs",
+  "prompt_type": "context_protocol",
+  "model": "gpt-5.2",
+  "timestamp": "2026-01-05T13:57:16.862393+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "access_control",
+    "vulnerable_functions": [
+      "createProposal"
+    ],
+    "severity": "medium",
+    "description": "The LockToVotePlugin.createProposal() at lines 77-131 does not perform any validation on the actions bound to the proposal. The for loop at lines 121-126 just pushes actions without checking targets. If the plugin's targetConfig is set to execute with delegatecall, actions targeting the LockManager will be executed on behalf of the plugin, allowing attackers to call proposalEnded() to remove active proposals from tracking.",
+    "root_cause": "The LockToVotePlugin.createProposal() at lines 77-131 does not perform any validation on the actions bound to the proposal. The for loop at lines 121-126 just pushes actions without checking targets. If the plugin's targetConfig is set to execute with delegatecall, actions targeting the LockManager will be executed on behalf of the plugin, allowing attackers to call proposalEnded() to remove active proposals from tracking.",
+    "attack_scenario": "1. A 'normal' proposal_1 is created ending in 1 year.\n2. Alice locks 100 tokens, votes NO on proposal_1.\n3. Attacker creates proposal_2 with action: LockManager.proposalEnded(proposal_1_id).\n4. proposal_2 passes and executes.\n5. proposalEnded(proposal_1) is called via delegatecall from the plugin.\n6. proposal_1 is removed from knownProposalIds.\n7. Alice calls unlock() - her NO vote is not cleared because proposal_1 isn't tracked.\n8. Alice withdraws tokens while her vote is still active on proposal_1.",
+    "fix_description": "Prevent the creation of new proposals when the action's target is address(this) (the plugin) or address(lockManager). Add validation in createProposal: 'if (_actions[i].to == address(this) || _actions[i].to == address(lockManager)) revert InvalidTarget();'",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.72,
+    "vulnerabilities": [
+      {
+        "type": "Supply-manipulation of voting thresholds (no snapshot of total voting power) leading to passing/DoS and potential underflow reverts",
+        "severity": "medium",
+        "vulnerable_function": "isSupportThresholdReachedEarly / isMinVotingPowerReached / isMinApprovalReached (via currentTokenSupply())",
+        "location": "MajorityVotingBase: isSupportThresholdReachedEarly(), isMinVotingPowerReached(), isMinApprovalReached()",
+        "explanation": "Protocol docs define participation/support vs N_total \u201cavailable at proposal creation time\u201d. Implementation instead uses currentTokenSupply() (IERC20.totalSupply()) at evaluation time. If the governance token\u2019s totalSupply can change during an active proposal (e.g., ERC20Burnable where any holder can burn, rebasing, permissionless minting, bridge minting), an attacker can change execution conditions after votes are cast. Additionally, in isSupportThresholdReachedEarly(), `noVotesWorstCase = currentTokenSupply() - yes - abstain` will revert on underflow if totalSupply decreases below (yes+abstain), making hasSucceeded/canExecute revert and potentially permanently DoS execution.",
+        "attack_scenario": "1) Attacker acquires and locks enough tokens to cast some YES votes, but not enough to satisfy minApproval/minParticipation under the original totalSupply.\n2) During voting (or right before execution), attacker burns a large amount of their *unlocked* tokens (or otherwise reduces totalSupply) so that `applyRatioCeiled(totalSupply, minApprovalRatio/minParticipationRatio)` drops below the already-cast YES/turnout.\n3) Proposal that would have failed under the creation-time supply now succeeds and can be executed. Alternatively, attacker reduces supply below (yes+abstain) to trigger underflow in isSupportThresholdReachedEarly(), causing canExecute/hasSucceeded to revert and blocking execution.",
+        "suggested_fix": "Snapshot the relevant total voting power at proposal creation and store it in Proposal (e.g., `proposal_.totalVotingPower = currentTokenSupply()` or preferably a lock-based total). Then use this snapshot in isMinVotingPowerReached/isMinApprovalReached/isSupportThresholdReachedEarly instead of currentTokenSupply(). Also guard early-execution math against underflow by using the snapshot and/or checked conditional logic."
+      },
+      {
+        "type": "Front-running / griefing via deterministic proposalId (proposal squatting)",
+        "severity": "low",
+        "vulnerable_function": "createProposal",
+        "location": "LockToVotePlugin: createProposal()",
+        "explanation": "proposalId is derived solely from `keccak256(abi.encode(_actions, _metadata))`. Any account with CREATE_PROPOSAL_PERMISSION_ID can pre-submit the same (_actions,_metadata) to force ProposalAlreadyExists for the intended proposer, effectively squatting the ID and blocking creation of that exact proposal content.",
+        "attack_scenario": "1) Victim broadcasts a createProposal tx (or shares proposal content off-chain).\n2) Attacker with CREATE_PROPOSAL_PERMISSION_ID copies the same metadata/actions and front-runs with higher gas.\n3) Victim\u2019s tx reverts with ProposalAlreadyExists, blocking that proposal unless they change metadata/actions (changing the ID).",
+        "suggested_fix": "Include a nonce/salt in the proposalId derivation (e.g., `keccak256(abi.encode(msg.sender, block.chainid, userNonce, _actions, _metadata))`) and store per-proposer nonces to preserve uniqueness without enabling squatting."
+      }
+    ],
+    "overall_explanation": "Core logic is generally sound (execution marks executed before external calls; voting updates are arithmetic-safe under Solidity 0.8). The main security concern is the use of live ERC20 totalSupply for threshold calculations, contradicting the documented creation-time N_total assumption and enabling supply-manipulation attacks or even execution DoS via underflow in early-execution math if supply drops. A secondary issue is deterministic proposal IDs allowing proposer-level front-running/griefing."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.72,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Supply-manipulation of voting thresholds (no snapshot of total voting power) leading to passing/DoS and potential underflow reverts\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"isSupportThresholdReachedEarly / isMinVotingPowerReached / isMinApprovalReached (via currentTokenSupply())\",\n      \"location\": \"MajorityVotingBase: isSupportThresholdReachedEarly(), isMinVotingPowerReached(), isMinApprovalReached()\",\n      \"explanation\": \"Protocol docs define participation/support vs N_total \u201cavailable at proposal creation time\u201d. Implementation instead uses currentTokenSupply() (IERC20.totalSupply()) at evaluation time. If the governance token\u2019s totalSupply can change during an active proposal (e.g., ERC20Burnable where any holder can burn, rebasing, permissionless minting, bridge minting), an attacker can change execution conditions after votes are cast. Additionally, in isSupportThresholdReachedEarly(), `noVotesWorstCase = currentTokenSupply() - yes - abstain` will revert on underflow if totalSupply decreases below (yes+abstain), making hasSucceeded/canExecute revert and potentially permanently DoS execution.\",\n      \"attack_scenario\": \"1) Attacker acquires and locks enough tokens to cast some YES votes, but not enough to satisfy minApproval/minParticipation under the original totalSupply.\\n2) During voting (or right before execution), attacker burns a large amount of their *unlocked* tokens (or otherwise reduces totalSupply) so that `applyRatioCeiled(totalSupply, minApprovalRatio/minParticipationRatio)` drops below the already-cast YES/turnout.\\n3) Proposal that would have failed under the creation-time supply now succeeds and can be executed. Alternatively, attacker reduces supply below (yes+abstain) to trigger underflow in isSupportThresholdReachedEarly(), causing canExecute/hasSucceeded to revert and blocking execution.\",\n      \"suggested_fix\": \"Snapshot the relevant total voting power at proposal creation and store it in Proposal (e.g., `proposal_.totalVotingPower = currentTokenSupply()` or preferably a lock-based total). Then use this snapshot in isMinVotingPowerReached/isMinApprovalReached/isSupportThresholdReachedEarly instead of currentTokenSupply(). Also guard early-execution math against underflow by using the snapshot and/or checked conditional logic.\"\n    },\n    {\n      \"type\": \"Front-running / griefing via deterministic proposalId (proposal squatting)\",\n      \"severity\": \"low\",\n      \"vulnerable_function\": \"createProposal\",\n      \"location\": \"LockToVotePlugin: createProposal()\",\n      \"explanation\": \"proposalId is derived solely from `keccak256(abi.encode(_actions, _metadata))`. Any account with CREATE_PROPOSAL_PERMISSION_ID can pre-submit the same (_actions,_metadata) to force ProposalAlreadyExists for the intended proposer, effectively squatting the ID and blocking creation of that exact proposal content.\",\n      \"attack_scenario\": \"1) Victim broadcasts a createProposal tx (or shares proposal content off-chain).\\n2) Attacker with CREATE_PROPOSAL_PERMISSION_ID copies the same metadata/actions and front-runs with higher gas.\\n3) Victim\u2019s tx reverts with ProposalAlreadyExists, blocking that proposal unless they change metadata/actions (changing the ID).\",\n      \"suggested_fix\": \"Include a nonce/salt in the proposalId derivation (e.g., `keccak256(abi.encode(msg.sender, block.chainid, userNonce, _actions, _metadata))`) and store per-proposer nonces to preserve uniqueness without enabling squatting.\"\n    }\n  ],\n  \"overall_explanation\": \"Core logic is generally sound (execution marks executed before external calls; voting updates are arithmetic-safe under Solidity 0.8). The main security concern is the use of live ERC20 totalSupply for threshold calculations, contradicting the documented creation-time N_total assumption and enabling supply-manipulation attacks or even execution DoS via underflow in early-execution math if supply drops. A secondary issue is deterministic proposal IDs allowing proposer-level front-running/griefing.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": true,
+    "context_file_count": 1,
+    "has_protocol_doc": true
+  },
+  "api_metrics": {
+    "input_tokens": 11064,
+    "output_tokens": 3013,
+    "latency_ms": 59179.9840927124
+  }
+}

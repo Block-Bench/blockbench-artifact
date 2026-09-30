@@ -1,0 +1,69 @@
+{
+  "sample_id": "gs_030",
+  "dataset": "gs",
+  "prompt_type": "context_protocol",
+  "model": "claude-opus-4-5",
+  "timestamp": "2026-01-05T13:53:48.073689+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "signature_replay",
+    "vulnerable_functions": [
+      "hashCallWithReplayProtection"
+    ],
+    "severity": "medium",
+    "description": "SessionSig.hashCallWithReplayProtection omits wallet address in hash, allowing signatures for one wallet to replay on another with same config and nonce. SessionManager.recoverSapientSignature and BaseAuth.signatureValidation do not bind to msg.sender.",
+    "root_cause": "SessionSig.hashCallWithReplayProtection omits wallet address in hash, allowing signatures for one wallet to replay on another with same config and nonce. SessionManager.recoverSapientSignature and BaseAuth.signatureValidation do not bind to msg.sender.",
+    "attack_scenario": "Sign payload for Wallet A, replay on Wallet B (same config, nonce). Drains both wallets. PoC: test/extensions/sessions/SessionReplay.t.sol, run forge test --match-test test_crossWalletSessionReplayDrainsSiblingWallet -vv. Logs show attacker draining two wallets.",
+    "fix_description": "Include address(this) in hashCallWithReplayProtection. Update SDK to hash (wallet, chainId, space, nonce, callIdx, call details).",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.85,
+    "vulnerabilities": [
+      {
+        "type": "Blacklist Bypass via Duplicate Addresses",
+        "severity": "medium",
+        "vulnerable_function": "recoverConfiguration",
+        "location": "SessionSig.recoverConfiguration - FLAG_BLACKLIST handling",
+        "explanation": "The blacklist sorting validation uses a strict less-than comparison (`sig.implicitBlacklist[i] < previousAddress`) which correctly rejects unsorted addresses. However, it allows duplicate addresses since `address == previousAddress` does not trigger the revert. While this doesn't directly bypass the blacklist, it allows inflating the blacklist array with duplicates, potentially causing issues in downstream validation logic that assumes unique entries or iterates through the blacklist expecting distinct addresses.",
+        "attack_scenario": "1. Attacker creates a session configuration with a blacklist containing duplicate addresses (e.g., [0x1, 0x1, 0x2]). 2. The validation passes since duplicates satisfy `>=` relationship. 3. Downstream code that checks if an address is blacklisted by counting occurrences or assumes unique entries may behave unexpectedly. 4. If blacklist validation uses array length for gas estimation or other logic, duplicates could cause unexpected behavior.",
+        "suggested_fix": "Change the comparison from `<` to `<=` to reject duplicate addresses: `if (sig.implicitBlacklist[i] <= previousAddress) { revert SessionErrors.InvalidBlacklistUnsorted(); }`"
+      },
+      {
+        "type": "Array Index Out of Bounds",
+        "severity": "medium",
+        "vulnerable_function": "recoverConfiguration",
+        "location": "SessionSig.recoverConfiguration - FLAG_BRANCH handling",
+        "explanation": "When processing branch permissions, the code copies all branch permissions to the parent's sessionPermissions array without checking if there's sufficient space. The initial array size is estimated based on `encoded.length / MIN_ENCODED_PERMISSION_SIZE`, but branches can contain their own permissions that weren't accounted for in the parent's size calculation. If a deeply nested branch structure contains more permissions than the estimated maximum, writing to `sig.sessionPermissions[permissionsCount++]` could write beyond the allocated array bounds.",
+        "attack_scenario": "1. Craft an encoded signature where the top-level configuration is small (small estimated maxPermissionsSize). 2. Include a branch that contains many permission entries. 3. When the branch permissions are copied to the parent array, permissionsCount exceeds the allocated array size. 4. This causes memory corruption or unexpected behavior due to writing past array bounds.",
+        "suggested_fix": "Before copying branch permissions, verify that `permissionsCount + branchSig.sessionPermissions.length <= sig.sessionPermissions.length`. Alternatively, use dynamic array pushing or recalculate the maximum size accounting for branch contents."
+      },
+      {
+        "type": "Missing Signature Malleability Protection",
+        "severity": "low",
+        "vulnerable_function": "recoverSignature",
+        "location": "SessionSig.recoverSignature - ecrecover usage",
+        "explanation": "The code uses raw ecrecover without checking that the `s` value is in the lower half of the curve order. ECDSA signatures are malleable - for any valid signature (r, s, v), there exists another valid signature (r, n-s, v') where n is the curve order. While the nonce-based replay protection prevents direct replay attacks, signature malleability could cause issues if signatures are used as unique identifiers elsewhere in the system or if there are any signature-based deduplication mechanisms.",
+        "attack_scenario": "1. Observe a valid session signature with values (r, s, v). 2. Compute the malleable signature (r, n-s, 27+28-v). 3. Both signatures recover to the same address and are considered valid. 4. If any external system tracks used signatures by their bytes representation, the malleable version could bypass such checks.",
+        "suggested_fix": "Add a check that `s <= 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0` (half of the secp256k1 curve order) to enforce signature canonicalization, or use OpenZeppelin's ECDSA library which includes this check."
+      }
+    ],
+    "overall_explanation": "The SessionSig library implements session signature recovery and validation for a smart contract wallet system. The analysis identified three potential vulnerabilities: (1) The blacklist validation allows duplicate addresses which could cause unexpected behavior in downstream validation logic. (2) The branch permission copying doesn't validate array bounds, potentially causing memory corruption with crafted nested configurations. (3) The ecrecover usage lacks signature malleability protection, though the impact is limited due to nonce-based replay protection. The most concerning issue is the array bounds problem in branch handling, which could lead to unpredictable behavior. The core signature recovery logic appears sound, with proper validation of identity signers and attestations."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.85,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Blacklist Bypass via Duplicate Addresses\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"recoverConfiguration\",\n      \"location\": \"SessionSig.recoverConfiguration - FLAG_BLACKLIST handling\",\n      \"explanation\": \"The blacklist sorting validation uses a strict less-than comparison (`sig.implicitBlacklist[i] < previousAddress`) which correctly rejects unsorted addresses. However, it allows duplicate addresses since `address == previousAddress` does not trigger the revert. While this doesn't directly bypass the blacklist, it allows inflating the blacklist array with duplicates, potentially causing issues in downstream validation logic that assumes unique entries or iterates through the blacklist expecting distinct addresses.\",\n      \"attack_scenario\": \"1. Attacker creates a session configuration with a blacklist containing duplicate addresses (e.g., [0x1, 0x1, 0x2]). 2. The validation passes since duplicates satisfy `>=` relationship. 3. Downstream code that checks if an address is blacklisted by counting occurrences or assumes unique entries may behave unexpectedly. 4. If blacklist validation uses array length for gas estimation or other logic, duplicates could cause unexpected behavior.\",\n      \"suggested_fix\": \"Change the comparison from `<` to `<=` to reject duplicate addresses: `if (sig.implicitBlacklist[i] <= previousAddress) { revert SessionErrors.InvalidBlacklistUnsorted(); }`\"\n    },\n    {\n      \"type\": \"Array Index Out of Bounds\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"recoverConfiguration\",\n      \"location\": \"SessionSig.recoverConfiguration - FLAG_BRANCH handling\",\n      \"explanation\": \"When processing branch permissions, the code copies all branch permissions to the parent's sessionPermissions array without checking if there's sufficient space. The initial array size is estimated based on `encoded.length / MIN_ENCODED_PERMISSION_SIZE`, but branches can contain their own permissions that weren't accounted for in the parent's size calculation. If a deeply nested branch structure contains more permissions than the estimated maximum, writing to `sig.sessionPermissions[permissionsCount++]` could write beyond the allocated array bounds.\",\n      \"attack_scenario\": \"1. Craft an encoded signature where the top-level configuration is small (small estimated maxPermissionsSize). 2. Include a branch that contains many permission entries. 3. When the branch permissions are copied to the parent array, permissionsCount exceeds the allocated array size. 4. This causes memory corruption or unexpected behavior due to writing past array bounds.\",\n      \"suggested_fix\": \"Before copying branch permissions, verify that `permissionsCount + branchSig.sessionPermissions.length <= sig.sessionPermissions.length`. Alternatively, use dynamic array pushing or recalculate the maximum size accounting for branch contents.\"\n    },\n    {\n      \"type\": \"Missing Signature Malleability Protection\",\n      \"severity\": \"low\",\n      \"vulnerable_function\": \"recoverSignature\",\n      \"location\": \"SessionSig.recoverSignature - ecrecover usage\",\n      \"explanation\": \"The code uses raw ecrecover without checking that the `s` value is in the lower half of the curve order. ECDSA signatures are malleable - for any valid signature (r, s, v), there exists another valid signature (r, n-s, v') where n is the curve order. While the nonce-based replay protection prevents direct replay attacks, signature malleability could cause issues if signatures are used as unique identifiers elsewhere in the system or if there are any signature-based deduplication mechanisms.\",\n      \"attack_scenario\": \"1. Observe a valid session signature with values (r, s, v). 2. Compute the malleable signature (r, n-s, 27+28-v). 3. Both signatures recover to the same address and are considered valid. 4. If any external system tracks used signatures by their bytes representation, the malleable version could bypass such checks.\",\n      \"suggested_fix\": \"Add a check that `s <= 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0` (half of the secp256k1 curve order) to enforce signature canonicalization, or use OpenZeppelin's ECDSA library which includes this check.\"\n    }\n  ],\n  \"overall_explanation\": \"The SessionSig library implements session signature recovery and validation for a smart contract wallet system. The analysis identified three potential vulnerabilities: (1) The blacklist validation allows duplicate addresses which could cause unexpected behavior in downstream validation logic. (2) The branch permission copying doesn't validate array bounds, potentially causing memory corruption with crafted nested configurations. (3) The ecrecover usage lacks signature malleability protection, though the impact is limited due to nonce-based replay protection. The most concerning issue is the array bounds problem in branch handling, which could lead to unpredictable behavior. The core signature recovery logic appears sound, with proper validation of identity signers and attestations.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": true,
+    "context_file_count": 1,
+    "has_protocol_doc": true
+  },
+  "api_metrics": {
+    "input_tokens": 9538,
+    "output_tokens": 1196,
+    "latency_ms": 24027.781009674072
+  }
+}

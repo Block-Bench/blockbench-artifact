@@ -1,0 +1,51 @@
+{
+  "sample_id": "gs_003",
+  "dataset": "gs",
+  "prompt_type": "context_protocol_cot",
+  "model": "qwen3-coder-plus",
+  "timestamp": "2026-05-25T16:56:19.719913+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "logic_error",
+    "vulnerable_functions": [
+      "emergencyWithdraw"
+    ],
+    "severity": "medium",
+    "description": "in the `GaugeV2` contract, if the contract was emergency activated, users calling `emergencyWithdraw()` will lose all past accrued rewards that didn\u2019t have `updateReward()` called on it previously for a user to earn rewards, he gets his mappings updated here modifier updateReward(address account) { rewardPerTokenStored = rewardPerToken(); lastUpdateTime = lastTimeRewardApplicable(); if (account != address(0)) { rewards[account] = earned(account); userRewardPerTokenPaid[account] = rewardPerTokenStored; } _; } as we see above, rewards mapping is registered as the return data from `earned()`, and when we look at it we see function earned(address account) public view returns (uint256) { rewards[account] + _balanceOf(account) * (rewardPerToken() - userRewardPerTokenPaid[account]) / 1e18; } we see that it returns old rewards + current balance of the user multiplied by the rewardPerToken (abstractly) so what happen will be as follows: 1. User stake 100e18 tokens 2. emergency activated 3. he had already earnt before the emergency 10e18 tokens not registered on his rewards mapping since he didn\u2019t call deposit/withdraw/getRewards to update his rewards 4. call emergencyWithdraw and his balance now is 0. 5. now earned() function return 0 rewards since his balance is 0 * rewardPerToken = 0 also the left-off rewards tokens are stuck in the contract forever. Impact: Loss of rewards for users and stuck reward tokens in the contract",
+    "root_cause": "in the `GaugeV2` contract, if the contract was emergency activated, users calling `emergencyWithdraw()` will lose all past accrued rewards that didn\u2019t have `updateReward()` called on it previously for a user to earn rewards, he gets his mappings updated here modifier updateReward(address account) { rewardPerTokenStored = rewardPerToken(); lastUpdateTime = lastTimeRewardApplicable(); if (account != address(0)) { rewards[account] = earned(account); userRewardPerTokenPaid[account] = rewardPerTokenStored; } _; } as we see above, rewards mapping is registered as the return data from `earned()`, and when we look at it we see function earned(address account) public view returns (uint256) { rewards[account] + _balanceOf(account) * (rewardPerToken() - userRewardPerTokenPaid[account]) / 1e18; } we see that it returns old rewards + current balance of the user multiplied by the rewardPerToken (abstractly) so what happen will be as follows: 1. User stake 100e18 tokens 2. emergency activated 3. he had already earnt before the emergency 10e18 tokens not registered on his rewards mapping since he didn\u2019t call deposit/withdraw/getRewards to update his rewards 4. call emergencyWithdraw and his balance now is 0. 5. now earned() function return 0 rewards since his balance is 0 * rewardPerToken = 0 also the left-off rewards tokens are stuck in the contract forever. Impact: Loss of rewards for users and stuck reward tokens in the contract",
+    "attack_scenario": "function test_emergencyWithdraw_strandsRewardsAndBurnsUserAccrual() external { vm.startPrank(address(this)); // Use HYBR both as staking TOKEN and rewardToken for simplicity // We have HYBR minted to this test from setup_InitMinter() uint256 initialHybr = hybr.balanceOf(address(this)); assertGt(initialHybr, 0, \"expected HYBR from initial mint\"); // Deploy GaugeV2 GaugeV2 gauge = new GaugeV2( address(hybr), address(rewardHybr), address(votingEscrow), address(hybr), address(this), address(0), address(0), false ); // Stake HYBR uint256 stakeAmount = 100 ether; hybr.approve(address(gauge), type(uint256).max); gauge.deposit(stakeAmount); // Fund rewards uint256 rewardAmount = 1_000 ether; hybr.approve(address(gauge), rewardAmount); gauge.notifyRewardAmount(address(hybr), rewardAmount); // Accrue some rewards vm.warp(block.timestamp + 7 days / 14); uint256 accruedBefore = gauge.earned(address(this)); assertGt(accruedBefore, 0, \"accrued must be > 0 before emergencyWithdraw\"); // Enable emergency and withdraw gauge.activateEmergencyMode(); gauge.emergencyWithdraw(); uint256 accruedAfter = gauge.earned(address(this)); assertEq(accruedAfter, 0, \"accrued should be zero after emergencyWithdraw\"); uint256 stuckRewards = hybr.balanceOf(address(gauge)); assertGt(stuckRewards, 0, \"reward tokens remain stuck in gauge\"); vm.stopPrank(); }",
+    "fix_description": "Add the `updateReward` modifier to the `emergencyWithdraw()` call",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.9,
+    "vulnerabilities": [
+      {
+        "type": "logic_error",
+        "severity": "medium",
+        "vulnerable_function": "emergencyWithdraw",
+        "location": "GaugeV2.emergencyWithdraw",
+        "explanation": "The emergencyWithdraw function does not update rewards before withdrawing tokens, causing users to lose accrued but unclaimed rewards. When emergency mode is activated, users who haven't previously called updateReward functions (like deposit/withdraw/getReward) will have accumulated rewards calculated based on their balance and rewardPerTokenPaid, but these remain in storage as 'virtual' rewards until updateReward is called. During emergencyWithdraw, the user's balance becomes zero, making future earned() calculations return 0 regardless of the stored rewards.",
+        "attack_scenario": "1. User stakes 100 tokens and earns rewards over time (these are tracked virtually but not yet updated in user's rewards mapping) 2. Contract owner activates emergency mode 3. User had 10 reward tokens accumulated but never called deposit/withdraw/getReward to update their rewards mapping 4. User calls emergencyWithdraw() which sets their balance to 0 without calling updateReward first 5. The user loses their 10 accumulated reward tokens as the earned() function will now return 0 due to balance being 0 6. Those rewards become permanently stuck in the contract",
+        "suggested_fix": "Add the updateReward modifier to the emergencyWithdraw function to ensure all accrued rewards are properly calculated and stored in the rewards mapping before the balance is reset to zero. Alternatively, explicitly call updateReward(msg.sender) at the beginning of the emergencyWithdraw function."
+      }
+    ],
+    "overall_explanation": "The contract contains a medium severity logic error where users can lose accrued but unclaimed rewards during emergency withdrawal. This occurs because emergencyWithdraw doesn't update the reward accounting before resetting the user's balance to zero, causing any virtual rewards to be lost when the balance-dependent earned() calculation subsequently returns zero."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.9,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"logic_error\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"emergencyWithdraw\",\n      \"location\": \"GaugeV2.emergencyWithdraw\",\n      \"explanation\": \"The emergencyWithdraw function does not update rewards before withdrawing tokens, causing users to lose accrued but unclaimed rewards. When emergency mode is activated, users who haven't previously called updateReward functions (like deposit/withdraw/getReward) will have accumulated rewards calculated based on their balance and rewardPerTokenPaid, but these remain in storage as 'virtual' rewards until updateReward is called. During emergencyWithdraw, the user's balance becomes zero, making future earned() calculations return 0 regardless of the stored rewards.\",\n      \"attack_scenario\": \"1. User stakes 100 tokens and earns rewards over time (these are tracked virtually but not yet updated in user's rewards mapping) 2. Contract owner activates emergency mode 3. User had 10 reward tokens accumulated but never called deposit/withdraw/getReward to update their rewards mapping 4. User calls emergencyWithdraw() which sets their balance to 0 without calling updateReward first 5. The user loses their 10 accumulated reward tokens as the earned() function will now return 0 due to balance being 0 6. Those rewards become permanently stuck in the contract\",\n      \"suggested_fix\": \"Add the updateReward modifier to the emergencyWithdraw function to ensure all accrued rewards are properly calculated and stored in the rewards mapping before the balance is reset to zero. Alternatively, explicitly call updateReward(msg.sender) at the beginning of the emergencyWithdraw function.\"\n    }\n  ],\n  \"overall_explanation\": \"The contract contains a medium severity logic error where users can lose accrued but unclaimed rewards during emergency withdrawal. This occurs because emergencyWithdraw doesn't update the reward accounting before resetting the user's balance to zero, causing any virtual rewards to be lost when the balance-dependent earned() calculation subsequently returns zero.\"\n}"
+  },
+  "context_info": {
+    "has_context_files": false,
+    "context_file_count": 0,
+    "has_protocol_doc": false
+  },
+  "api_metrics": {
+    "input_tokens": 4457,
+    "output_tokens": 429,
+    "latency_ms": 11191.237926483154
+  }
+}

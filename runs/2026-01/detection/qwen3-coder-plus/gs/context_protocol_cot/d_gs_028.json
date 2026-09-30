@@ -1,0 +1,60 @@
+{
+  "sample_id": "gs_028",
+  "dataset": "gs",
+  "prompt_type": "context_protocol_cot",
+  "model": "qwen3-coder-plus",
+  "timestamp": "2026-01-05T13:47:51.400987+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "access_control",
+    "vulnerable_functions": [
+      "recover"
+    ],
+    "severity": "high",
+    "description": "When a wallet is behind a checkpointer and a chained signature is used with bit 6 (checkpointer usage flag) set to zero, BaseSig.recover skips the checkpointer validation block (BaseSig.sol:88-106). This leaves _checkpointer and snapshot unset (zero-valued). In recoverChained, the checkpointer is ignored, and the signature validation passes even if the checkpointer should be enforced. The final validation succeeds because snapshot.imageHash == bytes32(0) as the checkpointer is ignored.",
+    "root_cause": "When a wallet is behind a checkpointer and a chained signature is used with bit 6 (checkpointer usage flag) set to zero, BaseSig.recover skips the checkpointer validation block (BaseSig.sol:88-106). This leaves _checkpointer and snapshot unset (zero-valued). In recoverChained, the checkpointer is ignored, and the signature validation passes even if the checkpointer should be enforced. The final validation succeeds because snapshot.imageHash == bytes32(0) as the checkpointer is ignored.",
+    "attack_scenario": "An evicted signer can sign a payload valid under stale wallet configuration and bypass checkpointer validation. PoC: Add test case to BaseSigTest and run forge test --match-test test_PoC_checkpointer_bypass. The test constructs a chained signature with checkpointer disabled, mocks the checkpointer response, and asserts successful recovery with correct image hash.",
+    "fix_description": "Do not permit checkpointer to be disabled (bit 6 unset) if chained signature is used. Revert in this case with custom error. Example fix in BaseSig.sol:\nif (signatureFlag & 0x40 == 0) {\n    revert MissingCheckpointer();\n}",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.9,
+    "vulnerabilities": [
+      {
+        "type": "Signature Replay Attack",
+        "severity": "critical",
+        "vulnerable_function": "recover",
+        "location": "BaseSig.recover",
+        "explanation": "The checkpoint validation logic has a critical flaw in chained signatures. When processing chained signatures, the checkpoint ordering validation only checks that checkpoints decrease sequentially within the chain (checkpoint < prevCheckpoint), but doesn't properly validate against the snapshot checkpoint for intermediate signatures, allowing replay of old wallet configurations.",
+        "attack_scenario": "1. Victim wallet has checkpoint N with imageHash H1, then updates to checkpoint N+1 with imageHash H2 2. Attacker captures valid signatures for old configuration H1 with checkpoint N 3. When wallet is at checkpoint N+1, attacker constructs chained signature with [old_sig_N+1, old_sig_N] 4. During validation, old_sig_N+1 passes with checkpoint N+1, then old_sig_N passes with checkpoint N (since N < N+1) 5. Final imageHash matches old configuration H1, allowing execution of operations using outdated wallet state",
+        "suggested_fix": "In recoverChained function, ensure each signature in the chain properly validates against snapshot checkpoint. Add explicit check: if (checkpoint <= _snapshot.checkpoint && _snapshot.imageHash != imageHash) revert UnusedSnapshot(_snapshot); to each signature validation in the loop, not just at the end."
+      },
+      {
+        "type": "Checkpointer Bypass",
+        "severity": "high",
+        "vulnerable_function": "recover",
+        "location": "BaseSig.recover",
+        "explanation": "The checkpointer precedence logic allows signature-provided checkpointer to override contract-provided checkpointer only when contract provides address(0). However, in chained signatures, the checkpointer from the signature can override any previous checkpointer, potentially allowing bypass of intended security checks.",
+        "attack_scenario": "1. Wallet expects operations to go through specific checkpointer C 2. Attacker crafts signature with checkpointer set to address(0) but includes chained signatures 3. Chained signatures contain a checkpointer override to malicious checkpointer C' 4. Since initial _checkpointer is address(0), signature-provided checkpointer gets precedence 5. Security validation from intended checkpointer C is bypassed",
+        "suggested_fix": "Implement proper checkpointer validation hierarchy. Add validation to ensure checkpointer changes are only allowed when authorized, or require that signature-provided checkpointer matches expected checkpointer when one is specified by the contract."
+      }
+    ],
+    "overall_explanation": "The BaseSig library contains critical vulnerabilities in its chained signature validation logic. The primary issue is a signature replay attack enabled by improper checkpoint validation sequencing in chained signatures, allowing attackers to execute operations using outdated wallet configurations. A secondary high-severity issue allows checkpointer bypass through parameter precedence manipulation."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.9,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Signature Replay Attack\",\n      \"severity\": \"critical\",\n      \"vulnerable_function\": \"recover\",\n      \"location\": \"BaseSig.recover\",\n      \"explanation\": \"The checkpoint validation logic has a critical flaw in chained signatures. When processing chained signatures, the checkpoint ordering validation only checks that checkpoints decrease sequentially within the chain (checkpoint < prevCheckpoint), but doesn't properly validate against the snapshot checkpoint for intermediate signatures, allowing replay of old wallet configurations.\",\n      \"attack_scenario\": \"1. Victim wallet has checkpoint N with imageHash H1, then updates to checkpoint N+1 with imageHash H2 2. Attacker captures valid signatures for old configuration H1 with checkpoint N 3. When wallet is at checkpoint N+1, attacker constructs chained signature with [old_sig_N+1, old_sig_N] 4. During validation, old_sig_N+1 passes with checkpoint N+1, then old_sig_N passes with checkpoint N (since N < N+1) 5. Final imageHash matches old configuration H1, allowing execution of operations using outdated wallet state\",\n      \"suggested_fix\": \"In recoverChained function, ensure each signature in the chain properly validates against snapshot checkpoint. Add explicit check: if (checkpoint <= _snapshot.checkpoint && _snapshot.imageHash != imageHash) revert UnusedSnapshot(_snapshot); to each signature validation in the loop, not just at the end.\"\n    },\n    {\n      \"type\": \"Checkpointer Bypass\",\n      \"severity\": \"high\",\n      \"vulnerable_function\": \"recover\",\n      \"location\": \"BaseSig.recover\",\n      \"explanation\": \"The checkpointer precedence logic allows signature-provided checkpointer to override contract-provided checkpointer only when contract provides address(0). However, in chained signatures, the checkpointer from the signature can override any previous checkpointer, potentially allowing bypass of intended security checks.\",\n      \"attack_scenario\": \"1. Wallet expects operations to go through specific checkpointer C 2. Attacker crafts signature with checkpointer set to address(0) but includes chained signatures 3. Chained signatures contain a checkpointer override to malicious checkpointer C' 4. Since initial _checkpointer is address(0), signature-provided checkpointer gets precedence 5. Security validation from intended checkpointer C is bypassed\",\n      \"suggested_fix\": \"Implement proper checkpointer validation hierarchy. Add validation to ensure checkpointer changes are only allowed when authorized, or require that signature-provided checkpointer matches expected checkpointer when one is specified by the contract.\"\n    }\n  ],\n  \"overall_explanation\": \"The BaseSig library contains critical vulnerabilities in its chained signature validation logic. The primary issue is a signature replay attack enabled by improper checkpoint validation sequencing in chained signatures, allowing attackers to execute operations using outdated wallet configurations. A secondary high-severity issue allows checkpointer bypass through parameter precedence manipulation.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": true,
+    "context_file_count": 1,
+    "has_protocol_doc": true
+  },
+  "api_metrics": {
+    "input_tokens": 7611,
+    "output_tokens": 629,
+    "latency_ms": 14136.512994766235
+  }
+}

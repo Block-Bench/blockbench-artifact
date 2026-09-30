@@ -1,0 +1,78 @@
+{
+  "sample_id": "gs_032",
+  "dataset": "gs",
+  "prompt_type": "context_protocol_cot_naturalistic",
+  "model": "gpt-5.2",
+  "timestamp": "2026-01-05T16:12:23.428574+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "logic_error",
+    "vulnerable_functions": [
+      "recoverSapientSignature"
+    ],
+    "severity": "medium",
+    "description": "BaseAuth.recoverSapientSignature returns bytes32(uint256(1)) instead of actual signer imageHash, violating ISapient interface. Breaks Merkle leaf construction in BaseSig.recoverBranch.",
+    "root_cause": "BaseAuth.recoverSapientSignature returns bytes32(uint256(1)) instead of actual signer imageHash, violating ISapient interface. Breaks Merkle leaf construction in BaseSig.recoverBranch.",
+    "attack_scenario": "Wallet uses another wallet as sapient signer \u2192 signature validation fails due to incorrect image hash. PoC: Add test to test/modules/BaseSig.t.sol: test_BaseAuth_recoverSapientSignature_ReturnsConstant. Deploys MinimalSapient, crafts signature, asserts constant return.",
+    "fix_description": "Return actual image hash from recoverSapientSignature. Extend signatureValidation to return imageHash or call BaseSig.recover.",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.72,
+    "vulnerabilities": [
+      {
+        "type": "Input validation / out-of-bounds read",
+        "severity": "low",
+        "vulnerable_function": "signatureValidation",
+        "location": "bytes1 signatureFlag = _signature[0];",
+        "explanation": "The code unconditionally reads _signature[0]. If _signature is empty, this triggers a Solidity panic (out-of-bounds) and reverts. This can cause unexpected reverts in callers (including IERC1271 isValidSignature), rather than cleanly returning an invalid result.",
+        "attack_scenario": "Any on-chain integration (router, verifier, module) that calls isValidSignature or recoverSapientSignature with user-provided signatures can be forced to revert by providing an empty signature. If the integration does not defensively handle reverts (common), this can become a denial-of-service vector for flows that expect a boolean-style validation.",
+        "suggested_fix": "Add an explicit length check before indexing: `if (_signature.length == 0) return (false, bytes32(0));` (or revert with a small, dedicated error). If you want EIP-1271 friendliness, prefer returning `false` for malformed inputs in the IERC1271 path."
+      },
+      {
+        "type": "EIP-1271 behavior deviation (reverts instead of returning invalid)",
+        "severity": "medium",
+        "vulnerable_function": "isValidSignature (via signatureValidation)",
+        "location": "signatureValidation reverts on InvalidSignatureWeight / InvalidStaticSignatureExpired / InvalidStaticSignatureWrongCaller",
+        "explanation": "EIP-1271 consumers often expect `isValidSignature` to return `0x00000000` for invalid signatures rather than reverting. Here, multiple invalid-signature conditions revert, which can break downstream contracts that do not wrap calls in try/catch and interpret reverts as fatal errors (not merely 'invalid').",
+        "attack_scenario": "A protocol that uses this wallet as an ERC-1271 signer (e.g., for permit-like checks, order validation, or account abstraction-style validation) may call `isValidSignature` during execution. An attacker supplies a signature that triggers `InvalidSignatureWeight` or triggers the static-signature branch with an expired timestamp, causing a revert and aborting the protocol\u2019s operation (DoS of that action).",
+        "suggested_fix": "Make `isValidSignature` non-reverting for invalid cases by catching/avoiding reverts: (a) refactor `signatureValidation` into a non-reverting variant used by IERC1271, or (b) in `isValidSignature`, use `try/catch` on an internal/external helper (or re-implement checks) and return `bytes4(0)` on any failure. Keep reverting variants for internal wallet execution if desired."
+      },
+      {
+        "type": "Gas griefing / oversized revert data",
+        "severity": "low",
+        "vulnerable_function": "recoverSapientSignature",
+        "location": "revert InvalidSapientSignature(_payload, _signature);",
+        "explanation": "On invalid sapient signatures, the revert includes the full decoded payload struct and the full signature bytes. If a caller provides a very large `_signature` and/or large `_payload.parentWallets`, the revert data can become large and expensive to allocate/copy, increasing gas costs and potentially causing out-of-gas in contexts that bubble up revert data.",
+        "attack_scenario": "If a parent wallet (or any on-chain system) calls `recoverSapientSignature` as part of its own signature validation and does not cap signature sizes, a malicious transaction can supply a very large signature blob that fails validation but causes high gas usage and large revert data handling, increasing the cost/failure likelihood of that validation path.",
+        "suggested_fix": "Avoid reverting with large dynamic data. Emit minimal errors (e.g., `error InvalidSapientSignature();`) or include only fixed-size identifiers (like `opHash`). Optionally enforce reasonable maximum lengths for `_signature` and `parentWallets` if they can be user-controlled in on-chain paths."
+      },
+      {
+        "type": "Design/footgun: static signature replay within validity window",
+        "severity": "low",
+        "vulnerable_function": "signatureValidation / setStaticSignature",
+        "location": "static signature branch returns true solely based on stored (addr,timestamp) and opHash",
+        "explanation": "The static-signature path treats any signature with the top bit set as valid if a matching static entry exists and is unexpired. The entry is not consumed/cleared on use, so the same opHash can be validated repeatedly until expiry. This is fine if (and only if) `opHash` commits to a nonce/checkpoint and intended one-time semantics; otherwise it becomes a replay authorization during the window.",
+        "attack_scenario": "If an integrator mistakenly uses static signatures for actions where the same `Payload` can be replayed (or `Payload.hash()` does not commit to an anti-replay value in some context), an attacker observing a successful call could resubmit the same payload during the validity window and be accepted again (especially if the stored caller is `address(0)` meaning any caller).",
+        "suggested_fix": "Ensure `Payload.hash()` commits to a nonce/checkpoint that is checked/updated elsewhere, or explicitly make static signatures one-time by clearing the mapping entry after successful use (if that matches intended semantics). Consider disallowing `addr == address(0)` unless you explicitly want open relaying."
+      }
+    ],
+    "overall_explanation": "What you\u2019re building: an auth module that validates either (a) a stored, time-bounded \u201cstatic signature\u201d keyed by opHash (and optionally bound to a specific caller), or (b) a weighted signature recovered via BaseSig, including support for nested/sapient signers (recoverSapientSignature appends the caller to parentWallets before validation).\n\nMain flows: `isValidSignature` converts a digest to a Payload and runs `signatureValidation`. `signatureValidation` first peeks at `_signature[0]` to choose the static-signature fast path; otherwise it calls `BaseSig.recover`, checks `weight >= threshold`, and then checks `_isValidImage(imageHash)`. `recoverSapientSignature` extends the parentWallets chain and runs the same validation.\n\nMain concerns: the code has a couple of sharp edges that can cause reverts where many ecosystems expect clean \u2018invalid\u2019 responses (notably ERC-1271), and it has an unchecked signature index read. None of these look like a direct funds-drain by themselves, but they can cause integration breakage and denial-of-service behavior in systems that assume signature checks are non-reverting. There\u2019s also a minor gas-griefing concern due to reverting with large dynamic data, and a replay/footgun risk depending on how opHash anti-replay is enforced elsewhere."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.72,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Input validation / out-of-bounds read\",\n      \"severity\": \"low\",\n      \"vulnerable_function\": \"signatureValidation\",\n      \"location\": \"bytes1 signatureFlag = _signature[0];\",\n      \"explanation\": \"The code unconditionally reads _signature[0]. If _signature is empty, this triggers a Solidity panic (out-of-bounds) and reverts. This can cause unexpected reverts in callers (including IERC1271 isValidSignature), rather than cleanly returning an invalid result.\",\n      \"attack_scenario\": \"Any on-chain integration (router, verifier, module) that calls isValidSignature or recoverSapientSignature with user-provided signatures can be forced to revert by providing an empty signature. If the integration does not defensively handle reverts (common), this can become a denial-of-service vector for flows that expect a boolean-style validation.\",\n      \"suggested_fix\": \"Add an explicit length check before indexing: `if (_signature.length == 0) return (false, bytes32(0));` (or revert with a small, dedicated error). If you want EIP-1271 friendliness, prefer returning `false` for malformed inputs in the IERC1271 path.\"\n    },\n    {\n      \"type\": \"EIP-1271 behavior deviation (reverts instead of returning invalid)\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"isValidSignature (via signatureValidation)\",\n      \"location\": \"signatureValidation reverts on InvalidSignatureWeight / InvalidStaticSignatureExpired / InvalidStaticSignatureWrongCaller\",\n      \"explanation\": \"EIP-1271 consumers often expect `isValidSignature` to return `0x00000000` for invalid signatures rather than reverting. Here, multiple invalid-signature conditions revert, which can break downstream contracts that do not wrap calls in try/catch and interpret reverts as fatal errors (not merely 'invalid').\",\n      \"attack_scenario\": \"A protocol that uses this wallet as an ERC-1271 signer (e.g., for permit-like checks, order validation, or account abstraction-style validation) may call `isValidSignature` during execution. An attacker supplies a signature that triggers `InvalidSignatureWeight` or triggers the static-signature branch with an expired timestamp, causing a revert and aborting the protocol\u2019s operation (DoS of that action).\",\n      \"suggested_fix\": \"Make `isValidSignature` non-reverting for invalid cases by catching/avoiding reverts: (a) refactor `signatureValidation` into a non-reverting variant used by IERC1271, or (b) in `isValidSignature`, use `try/catch` on an internal/external helper (or re-implement checks) and return `bytes4(0)` on any failure. Keep reverting variants for internal wallet execution if desired.\"\n    },\n    {\n      \"type\": \"Gas griefing / oversized revert data\",\n      \"severity\": \"low\",\n      \"vulnerable_function\": \"recoverSapientSignature\",\n      \"location\": \"revert InvalidSapientSignature(_payload, _signature);\",\n      \"explanation\": \"On invalid sapient signatures, the revert includes the full decoded payload struct and the full signature bytes. If a caller provides a very large `_signature` and/or large `_payload.parentWallets`, the revert data can become large and expensive to allocate/copy, increasing gas costs and potentially causing out-of-gas in contexts that bubble up revert data.\",\n      \"attack_scenario\": \"If a parent wallet (or any on-chain system) calls `recoverSapientSignature` as part of its own signature validation and does not cap signature sizes, a malicious transaction can supply a very large signature blob that fails validation but causes high gas usage and large revert data handling, increasing the cost/failure likelihood of that validation path.\",\n      \"suggested_fix\": \"Avoid reverting with large dynamic data. Emit minimal errors (e.g., `error InvalidSapientSignature();`) or include only fixed-size identifiers (like `opHash`). Optionally enforce reasonable maximum lengths for `_signature` and `parentWallets` if they can be user-controlled in on-chain paths.\"\n    },\n    {\n      \"type\": \"Design/footgun: static signature replay within validity window\",\n      \"severity\": \"low\",\n      \"vulnerable_function\": \"signatureValidation / setStaticSignature\",\n      \"location\": \"static signature branch returns true solely based on stored (addr,timestamp) and opHash\",\n      \"explanation\": \"The static-signature path treats any signature with the top bit set as valid if a matching static entry exists and is unexpired. The entry is not consumed/cleared on use, so the same opHash can be validated repeatedly until expiry. This is fine if (and only if) `opHash` commits to a nonce/checkpoint and intended one-time semantics; otherwise it becomes a replay authorization during the window.\",\n      \"attack_scenario\": \"If an integrator mistakenly uses static signatures for actions where the same `Payload` can be replayed (or `Payload.hash()` does not commit to an anti-replay value in some context), an attacker observing a successful call could resubmit the same payload during the validity window and be accepted again (especially if the stored caller is `address(0)` meaning any caller).\",\n      \"suggested_fix\": \"Ensure `Payload.hash()` commits to a nonce/checkpoint that is checked/updated elsewhere, or explicitly make static signatures one-time by clearing the mapping entry after successful use (if that matches intended semantics). Consider disallowing `addr == address(0)` unless you explicitly want open relaying.\"\n    }\n  ],\n  \"overall_explanation\": \"What you\u2019re building: an auth module that validates either (a) a stored, time-bounded \u201cstatic signature\u201d keyed by opHash (and optionally bound to a specific caller), or (b) a weighted signature recovered via BaseSig, including support for nested/sapient signers (recoverSapientSignature appends the caller to parentWallets before validation).\\n\\nMain flows: `isValidSignature` converts a digest to a Payload and runs `signatureValidation`. `signatureValidation` first peeks at `_signature[0]` to choose the static-signature fast path; otherwise it calls `BaseSig.recover`, checks `weight >= threshold`, and then checks `_isValidImage(imageHash)`. `recoverSapientSignature` extends the parentWallets chain and runs the same validation.\\n\\nMain concerns: the code has a couple of sharp edges that can cause reverts where many ecosystems expect clean \u2018invalid\u2019 responses (notably ERC-1271), and it has an unchecked signature index read. None of these look like a direct funds-drain by themselves, but they can cause integration breakage and denial-of-service behavior in systems that assume signature checks are non-reverting. There\u2019s also a minor gas-griefing concern due to reverting with large dynamic data, and a replay/footgun risk depending on how opHash anti-replay is enforced elsewhere.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": true,
+    "context_file_count": 1,
+    "has_protocol_doc": true
+  },
+  "api_metrics": {
+    "input_tokens": 3590,
+    "output_tokens": 3012,
+    "latency_ms": 51401.7071723938
+  }
+}

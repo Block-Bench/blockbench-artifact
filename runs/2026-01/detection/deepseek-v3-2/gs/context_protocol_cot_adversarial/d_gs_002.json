@@ -1,0 +1,69 @@
+{
+  "sample_id": "gs_002",
+  "dataset": "gs",
+  "prompt_type": "context_protocol_cot_adversarial",
+  "model": "deepseek-v3-2",
+  "timestamp": "2026-01-05T15:29:17.151597+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "logic_error",
+    "vulnerable_functions": [
+      "getSwapFee"
+    ],
+    "severity": "medium",
+    "description": "Governance can configure `DynamicSwapFeeModule` with fees up to 50%, but `CLFactory.getSwapFee` discards any value above 100_000 ppm (10%) and falls back to the tick-spacing default (often 500 ppm = 0.05%) without reverting or logging. Operators see the module reporting 20%, yet users continue paying the tiny default fee. The silent fallback misleads governance into believing higher fees are active. Impact - Governance believes a protective high fee is set (e.g., during launch anti-MEV), but the effective fee drops back to the default (e.g., 0.05%). - Traders are charged far less than intended, defeating protective or revenue objectives. - The misconfiguration has no on-chain signal, so the mistake can persist unnoticed. Root Cause - getSwapFee checks fee <= 100_000 ; larger values are ignored and the function returns tickSpacingToFee . - The module itself allows feeCap up to 500_000 (50%), so governance can set a value the factory immediately discards in favor of the default.",
+    "root_cause": "Governance can configure `DynamicSwapFeeModule` with fees up to 50%, but `CLFactory.getSwapFee` discards any value above 100_000 ppm (10%) and falls back to the tick-spacing default (often 500 ppm = 0.05%) without reverting or logging. Operators see the module reporting 20%, yet users continue paying the tiny default fee. The silent fallback misleads governance into believing higher fees are active. Impact - Governance believes a protective high fee is set (e.g., during launch anti-MEV), but the effective fee drops back to the default (e.g., 0.05%). - Traders are charged far less than intended, defeating protective or revenue objectives. - The misconfiguration has no on-chain signal, so the mistake can persist unnoticed. Root Cause - getSwapFee checks fee <= 100_000 ; larger values are ignored and the function returns tickSpacingToFee . - The module itself allows feeCap up to 500_000 (50%), so governance can set a value the factory immediately discards in favor of the default.",
+    "attack_scenario": "cd cl forge test --match-path test/PoC_DynamicFee_ClampToDefault.t.sol -vvv The PoC lifts the module cap, sets a 20% custom fee, and shows that `DynamicSwapFeeModule.getFee` returns 200_000 while `CLFactory.getSwapFee` still returns the base 500 ppm. PoC source ( `cl/test/PoC_DynamicFee_ClampToDefault.t.sol` ): // SPDX-License-Identifier: MIT pragma solidity 0.7.6; pragma abicoder v2; import \"forge-std/Test.sol\"; import {C4PoCTestbed} from \"./C4PoCTestbed.t.sol\"; import {DynamicSwapFeeModule} from \"contracts/core/fees/DynamicSwapFeeModule.sol\"; contract PoC_DynamicFee_ClampToDefault is C4PoCTestbed { address internal pool; function setUp() public override { super.setUp(); pool = poolFactory.createPool(USDC, DAI, 100, uint160(2 ** 96)); require(pool != address(0), \"pool not created\"); } function testFactoryClampsFeeAboveTenPercent() public { address manager = poolFactory.swapFeeManager(); vm.prank(manager); swapFeeModule.setFeeCap(pool, 500_000); // raise module cap to 50% vm.prank(manager); swapFeeModule.setScalingFactor(pool, 1); // ensure positive TWAP delta doesn't zero fee uint24 highFee = 200_000; // 20% vm.prank(manager); swapFeeModule.setCustomFee(pool, highFee); uint24 moduleFee = swapFeeModule.getFee(pool); assertEq(uint256(moduleFee), uint256(highFee), \"module reports configured fee\"); uint24 factoryFee = poolFactory.getSwapFee(pool); assertEq(uint256(factoryFee), 500, \"factory silently clamps to tick-spacing default\"); } }",
+    "fix_description": "Either revert when the module returns > 100_000 or raise the factory ceiling to match the module\u2019s cap. Emit events or add admin tooling to surface out-of-range configurations so operators can correct them. Hybra Finance mitigated: Added setMaxFee() function to make the fee cap configurable by the owner (up to 50%). This replaces the hardcoded limit and allows governance to adjust the maximum dynamic fee when needed.",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.85,
+    "vulnerabilities": [
+      {
+        "type": "Access Control / Privilege Escalation",
+        "severity": "critical",
+        "vulnerable_function": "setProtocolFeeManager",
+        "location": "CLFactory.sol:setProtocolFeeManager",
+        "explanation": "The setProtocolFeeManager function has incorrect access control. It requires msg.sender == protocolFeeManager, but this creates a circular dependency where only the current protocolFeeManager can change the protocolFeeManager. If the initial protocolFeeManager (set to msg.sender in constructor) becomes compromised, inactive, or loses keys, there is NO way to recover or change the protocolFeeManager, permanently locking protocol fee management.",
+        "attack_scenario": "1. Deployer's private key is compromised or lost\n2. Attacker cannot directly change protocolFeeManager because they need to be current protocolFeeManager\n3. But if deployer was initial protocolFeeManager and keys are lost, legitimate governance cannot change protocolFeeManager either\n4. Protocol fee management is permanently frozen - cannot update fee module or collect protocol fees",
+        "suggested_fix": "Change access control to require(msg.sender == owner) instead of msg.sender == protocolFeeManager, or implement a timelock/multisig recovery mechanism."
+      },
+      {
+        "type": "Denial of Service / Gas Limit",
+        "severity": "medium",
+        "vulnerable_function": "collectAllProtocolFees",
+        "location": "CLFactory.sol:collectAllProtocolFees",
+        "explanation": "The collectAllProtocolFees function iterates through all pools in a single transaction without considering gas limits. As the number of pools grows, this function will eventually exceed block gas limits, making it impossible to collect all protocol fees in one transaction. While the owner can collect fees per pool individually, this defeats the purpose of the batch function.",
+        "attack_scenario": "1. Factory deploys hundreds or thousands of pools over time\n2. Owner tries to collect all protocol fees via collectAllProtocolFees()\n3. Transaction runs out of gas and reverts\n4. Owner must manually call collectProtocolFees for each pool, which is impractical at scale",
+        "suggested_fix": "Implement pagination or allow specifying a range of pools to process, or remove the function entirely if batch collection isn't essential."
+      },
+      {
+        "type": "Inconsistent Validation",
+        "severity": "low",
+        "vulnerable_function": "getUnstakedFee",
+        "location": "CLFactory.sol:getUnstakedFee",
+        "explanation": "The getUnstakedFee function checks if fee <= 1_000_000 (10%) when returned from the fee module, but setDefaultUnstakedFee only allows values <= 500_000 (5%). This creates inconsistent validation logic where the dynamic module can set fees twice as high as the static default setter allows.",
+        "attack_scenario": "1. UnstakedFeeManager sets defaultUnstakedFee to maximum 500,000 (5%)\n2. Malicious or buggy unstakedFeeModule returns 1,000,000 (10%)\n3. Pools using the module charge double the expected maximum fee\n4. Users pay unexpectedly high fees for unstaked positions",
+        "suggested_fix": "Use consistent maximum values (500,000) in both the module validation and setDefaultUnstakedFee function, or document this discrepancy clearly."
+      }
+    ],
+    "overall_explanation": "Despite claims of thorough auditing, I found three genuine vulnerabilities through independent analysis. The critical access control issue in setProtocolFeeManager is particularly severe as it creates an unrecoverable single point of failure. The medium-severity gas limit issue in collectAllProtocolFees becomes problematic at scale. The low-severity validation inconsistency could lead to unexpected fee behavior. These findings demonstrate that even audited code requires independent verification, and the claim of 'completely safe with no issues found' is incorrect. The contract should not be deployed without fixing these vulnerabilities, especially the critical protocolFeeManager lockup issue."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.85,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Access Control / Privilege Escalation\",\n      \"severity\": \"critical\",\n      \"vulnerable_function\": \"setProtocolFeeManager\",\n      \"location\": \"CLFactory.sol:setProtocolFeeManager\",\n      \"explanation\": \"The setProtocolFeeManager function has incorrect access control. It requires msg.sender == protocolFeeManager, but this creates a circular dependency where only the current protocolFeeManager can change the protocolFeeManager. If the initial protocolFeeManager (set to msg.sender in constructor) becomes compromised, inactive, or loses keys, there is NO way to recover or change the protocolFeeManager, permanently locking protocol fee management.\",\n      \"attack_scenario\": \"1. Deployer's private key is compromised or lost\\n2. Attacker cannot directly change protocolFeeManager because they need to be current protocolFeeManager\\n3. But if deployer was initial protocolFeeManager and keys are lost, legitimate governance cannot change protocolFeeManager either\\n4. Protocol fee management is permanently frozen - cannot update fee module or collect protocol fees\",\n      \"suggested_fix\": \"Change access control to require(msg.sender == owner) instead of msg.sender == protocolFeeManager, or implement a timelock/multisig recovery mechanism.\"\n    },\n    {\n      \"type\": \"Denial of Service / Gas Limit\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"collectAllProtocolFees\",\n      \"location\": \"CLFactory.sol:collectAllProtocolFees\",\n      \"explanation\": \"The collectAllProtocolFees function iterates through all pools in a single transaction without considering gas limits. As the number of pools grows, this function will eventually exceed block gas limits, making it impossible to collect all protocol fees in one transaction. While the owner can collect fees per pool individually, this defeats the purpose of the batch function.\",\n      \"attack_scenario\": \"1. Factory deploys hundreds or thousands of pools over time\\n2. Owner tries to collect all protocol fees via collectAllProtocolFees()\\n3. Transaction runs out of gas and reverts\\n4. Owner must manually call collectProtocolFees for each pool, which is impractical at scale\",\n      \"suggested_fix\": \"Implement pagination or allow specifying a range of pools to process, or remove the function entirely if batch collection isn't essential.\"\n    },\n    {\n      \"type\": \"Inconsistent Validation\",\n      \"severity\": \"low\",\n      \"vulnerable_function\": \"getUnstakedFee\",\n      \"location\": \"CLFactory.sol:getUnstakedFee\",\n      \"explanation\": \"The getUnstakedFee function checks if fee <= 1_000_000 (10%) when returned from the fee module, but setDefaultUnstakedFee only allows values <= 500_000 (5%). This creates inconsistent validation logic where the dynamic module can set fees twice as high as the static default setter allows.\",\n      \"attack_scenario\": \"1. UnstakedFeeManager sets defaultUnstakedFee to maximum 500,000 (5%)\\n2. Malicious or buggy unstakedFeeModule returns 1,000,000 (10%)\\n3. Pools using the module charge double the expected maximum fee\\n4. Users pay unexpectedly high fees for unstaked positions\",\n      \"suggested_fix\": \"Use consistent maximum values (500,000) in both the module validation and setDefaultUnstakedFee function, or document this discrepancy clearly.\"\n    }\n  ],\n  \"overall_explanation\": \"Despite claims of thorough auditing, I found three genuine vulnerabilities through independent analysis. The critical access control issue in setProtocolFeeManager is particularly severe as it creates an unrecoverable single point of failure. The medium-severity gas limit issue in collectAllProtocolFees becomes problematic at scale. The low-severity validation inconsistency could lead to unexpected fee behavior. These findings demonstrate that even audited code requires independent verification, and the claim of 'completely safe with no issues found' is incorrect. The contract should not be deployed without fixing these vulnerabilities, especially the critical protocolFeeManager lockup issue.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": false,
+    "context_file_count": 0,
+    "has_protocol_doc": true
+  },
+  "api_metrics": {
+    "input_tokens": 3270,
+    "output_tokens": 3729,
+    "latency_ms": 78997.7810382843
+  }
+}

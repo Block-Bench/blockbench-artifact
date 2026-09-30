@@ -1,0 +1,78 @@
+{
+  "sample_id": "gs_002",
+  "dataset": "gs",
+  "prompt_type": "context_protocol_cot_naturalistic",
+  "model": "grok-4-fast",
+  "timestamp": "2026-01-05T15:29:44.797950+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "logic_error",
+    "vulnerable_functions": [
+      "getSwapFee"
+    ],
+    "severity": "medium",
+    "description": "Governance can configure `DynamicSwapFeeModule` with fees up to 50%, but `CLFactory.getSwapFee` discards any value above 100_000 ppm (10%) and falls back to the tick-spacing default (often 500 ppm = 0.05%) without reverting or logging. Operators see the module reporting 20%, yet users continue paying the tiny default fee. The silent fallback misleads governance into believing higher fees are active. Impact - Governance believes a protective high fee is set (e.g., during launch anti-MEV), but the effective fee drops back to the default (e.g., 0.05%). - Traders are charged far less than intended, defeating protective or revenue objectives. - The misconfiguration has no on-chain signal, so the mistake can persist unnoticed. Root Cause - getSwapFee checks fee <= 100_000 ; larger values are ignored and the function returns tickSpacingToFee . - The module itself allows feeCap up to 500_000 (50%), so governance can set a value the factory immediately discards in favor of the default.",
+    "root_cause": "Governance can configure `DynamicSwapFeeModule` with fees up to 50%, but `CLFactory.getSwapFee` discards any value above 100_000 ppm (10%) and falls back to the tick-spacing default (often 500 ppm = 0.05%) without reverting or logging. Operators see the module reporting 20%, yet users continue paying the tiny default fee. The silent fallback misleads governance into believing higher fees are active. Impact - Governance believes a protective high fee is set (e.g., during launch anti-MEV), but the effective fee drops back to the default (e.g., 0.05%). - Traders are charged far less than intended, defeating protective or revenue objectives. - The misconfiguration has no on-chain signal, so the mistake can persist unnoticed. Root Cause - getSwapFee checks fee <= 100_000 ; larger values are ignored and the function returns tickSpacingToFee . - The module itself allows feeCap up to 500_000 (50%), so governance can set a value the factory immediately discards in favor of the default.",
+    "attack_scenario": "cd cl forge test --match-path test/PoC_DynamicFee_ClampToDefault.t.sol -vvv The PoC lifts the module cap, sets a 20% custom fee, and shows that `DynamicSwapFeeModule.getFee` returns 200_000 while `CLFactory.getSwapFee` still returns the base 500 ppm. PoC source ( `cl/test/PoC_DynamicFee_ClampToDefault.t.sol` ): // SPDX-License-Identifier: MIT pragma solidity 0.7.6; pragma abicoder v2; import \"forge-std/Test.sol\"; import {C4PoCTestbed} from \"./C4PoCTestbed.t.sol\"; import {DynamicSwapFeeModule} from \"contracts/core/fees/DynamicSwapFeeModule.sol\"; contract PoC_DynamicFee_ClampToDefault is C4PoCTestbed { address internal pool; function setUp() public override { super.setUp(); pool = poolFactory.createPool(USDC, DAI, 100, uint160(2 ** 96)); require(pool != address(0), \"pool not created\"); } function testFactoryClampsFeeAboveTenPercent() public { address manager = poolFactory.swapFeeManager(); vm.prank(manager); swapFeeModule.setFeeCap(pool, 500_000); // raise module cap to 50% vm.prank(manager); swapFeeModule.setScalingFactor(pool, 1); // ensure positive TWAP delta doesn't zero fee uint24 highFee = 200_000; // 20% vm.prank(manager); swapFeeModule.setCustomFee(pool, highFee); uint24 moduleFee = swapFeeModule.getFee(pool); assertEq(uint256(moduleFee), uint256(highFee), \"module reports configured fee\"); uint24 factoryFee = poolFactory.getSwapFee(pool); assertEq(uint256(factoryFee), 500, \"factory silently clamps to tick-spacing default\"); } }",
+    "fix_description": "Either revert when the module returns > 100_000 or raise the factory ceiling to match the module\u2019s cap. Emit events or add admin tooling to surface out-of-range configurations so operators can correct them. Hybra Finance mitigated: Added setMaxFee() function to make the fee cap configurable by the owner (up to 50%). This replaces the hardcoded limit and allows governance to adjust the maximum dynamic fee when needed.",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "safe",
+    "confidence": 0.95,
+    "vulnerabilities": [
+      {
+        "type": "gas optimization / usability",
+        "severity": "low",
+        "vulnerable_function": "collectAllProtocolFees",
+        "location": "loop over allPools",
+        "explanation": "The function iterates over all pools and calls collectProtocolFees on each, which could exceed the block gas limit if there are many pools (e.g., hundreds), causing the transaction to fail.",
+        "attack_scenario": "No direct attack, but the owner cannot collect fees from all pools in one transaction if the number of pools grows large, requiring manual batching via the single-pool collect function.",
+        "suggested_fix": "Add pagination parameters (e.g., start and end indices) to the function to allow collecting fees in batches, or remove the function and rely on the single-pool version."
+      },
+      {
+        "type": "reentrancy / invalid input handling",
+        "severity": "low",
+        "vulnerable_function": "getSwapFee",
+        "location": "fallback to CLPool(pool).tickSpacing()",
+        "explanation": "If an invalid or non-existent pool address is passed, calling CLPool(pool).tickSpacing() will revert, causing the entire view function to fail. Other fee getters do not call pool functions.",
+        "attack_scenario": "An external caller passing a non-pool address causes a revert, potentially DoS-ing the view call, though pools calling with their own address (address(this)) will succeed.",
+        "suggested_fix": "Add a check like if (!isPool[pool]) return 0; before accessing pool.tickSpacing(), or handle the call with low-level call to avoid revert propagation."
+      },
+      {
+        "type": "missing functionality",
+        "severity": "medium",
+        "vulnerable_function": "N/A (contract-wide)",
+        "location": "defaultProtocolFee",
+        "explanation": "There is no setter function for defaultProtocolFee (unlike defaultUnstakedFee), so governance cannot update it after deployment. It is hardcoded in the constructor to 250_000 (0.25%).",
+        "attack_scenario": "If market conditions require adjusting the default protocol fee, it cannot be done without deploying a new factory, potentially locking in suboptimal fees.",
+        "suggested_fix": "Add a setDefaultProtocolFee function similar to setDefaultUnstakedFee, with appropriate access control (e.g., protocolFeeManager) and event emission, including a cap (e.g., <= 500_000)."
+      },
+      {
+        "type": "event emission inconsistency",
+        "severity": "low",
+        "vulnerable_function": "setProtocolFeeModule, setProtocolFeeManager",
+        "location": "missing old value and emit",
+        "explanation": "These functions update the addresses but do not store the old value or emit events (unlike setSwapFeeModule and setUnstakedFeeModule). The constructor also lacks emits for protocol-related initializations.",
+        "attack_scenario": "Off-chain indexers or monitors cannot track changes to protocol fee module/manager, leading to incomplete event logs and potential monitoring issues.",
+        "suggested_fix": "Add old value storage and emit events (e.g., ProtocolFeeModuleChanged(old, new)) in both functions, and emit initial set events in the constructor for consistency."
+      }
+    ],
+    "overall_explanation": "The contract implements the intended factory functionality for creating and managing concentrated liquidity pools with dynamic fee support. Core flows like pool creation, fee retrieval, and access controls are solid, with proper checks (e.g., no duplicate pools, token sorting, fee caps). No critical vulnerabilities like reentrancy, unauthorized access, or fund loss were found. The issues are mostly usability, consistency, and minor robustness concerns that don't compromise security but could be improved for production. Solidity 0.7.6 is outdated (consider upgrading for custom errors and optimizations), but it doesn't introduce risks here. Overall, it's safe to proceed with the noted fixes."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "{\n  \"verdict\": \"safe\",\n  \"confidence\": 0.95,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"gas optimization / usability\",\n      \"severity\": \"low\",\n      \"vulnerable_function\": \"collectAllProtocolFees\",\n      \"location\": \"loop over allPools\",\n      \"explanation\": \"The function iterates over all pools and calls collectProtocolFees on each, which could exceed the block gas limit if there are many pools (e.g., hundreds), causing the transaction to fail.\",\n      \"attack_scenario\": \"No direct attack, but the owner cannot collect fees from all pools in one transaction if the number of pools grows large, requiring manual batching via the single-pool collect function.\",\n      \"suggested_fix\": \"Add pagination parameters (e.g., start and end indices) to the function to allow collecting fees in batches, or remove the function and rely on the single-pool version.\"\n    },\n    {\n      \"type\": \"reentrancy / invalid input handling\",\n      \"severity\": \"low\",\n      \"vulnerable_function\": \"getSwapFee\",\n      \"location\": \"fallback to CLPool(pool).tickSpacing()\",\n      \"explanation\": \"If an invalid or non-existent pool address is passed, calling CLPool(pool).tickSpacing() will revert, causing the entire view function to fail. Other fee getters do not call pool functions.\",\n      \"attack_scenario\": \"An external caller passing a non-pool address causes a revert, potentially DoS-ing the view call, though pools calling with their own address (address(this)) will succeed.\",\n      \"suggested_fix\": \"Add a check like if (!isPool[pool]) return 0; before accessing pool.tickSpacing(), or handle the call with try-catch (though limited in 0.7.6) to return a default.\",\n      \"suggested_fix\": \"Add a check like if (!isPool[pool]) return 0; before accessing pool.tickSpacing(), or handle the call with low-level call to avoid revert propagation.\"\n    },\n    {\n      \"type\": \"missing functionality\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"N/A (contract-wide)\",\n      \"location\": \"defaultProtocolFee\",\n      \"explanation\": \"There is no setter function for defaultProtocolFee (unlike defaultUnstakedFee), so governance cannot update it after deployment. It is hardcoded in the constructor to 250_000 (0.25%).\",\n      \"attack_scenario\": \"If market conditions require adjusting the default protocol fee, it cannot be done without deploying a new factory, potentially locking in suboptimal fees.\",\n      \"suggested_fix\": \"Add a setDefaultProtocolFee function similar to setDefaultUnstakedFee, with appropriate access control (e.g., protocolFeeManager) and event emission, including a cap (e.g., <= 500_000).\"\n    },\n    {\n      \"type\": \"event emission inconsistency\",\n      \"severity\": \"low\",\n      \"vulnerable_function\": \"setProtocolFeeModule, setProtocolFeeManager\",\n      \"location\": \"missing old value and emit\",\n      \"explanation\": \"These functions update the addresses but do not store the old value or emit events (unlike setSwapFeeModule and setUnstakedFeeModule). The constructor also lacks emits for protocol-related initializations.\",\n      \"attack_scenario\": \"Off-chain indexers or monitors cannot track changes to protocol fee module/manager, leading to incomplete event logs and potential monitoring issues.\",\n      \"suggested_fix\": \"Add old value storage and emit events (e.g., ProtocolFeeModuleChanged(old, new)) in both functions, and emit initial set events in the constructor for consistency.\"\n    }\n  ],\n  \"overall_explanation\": \"The contract implements the intended factory functionality for creating and managing concentrated liquidity pools with dynamic fee support. Core flows like pool creation, fee retrieval, and access controls are solid, with proper checks (e.g., no duplicate pools, token sorting, fee caps). No critical vulnerabilities like reentrancy, unauthorized access, or fund loss were found. The issues are mostly usability, consistency, and minor robustness concerns that don't compromise security but could be improved for production. Solidity 0.7.6 is outdated (consider upgrading for custom errors and optimizations), but it doesn't introduce risks here. Overall, it's safe to proceed with the noted fixes.\"\n}"
+  },
+  "context_info": {
+    "has_context_files": false,
+    "context_file_count": 0,
+    "has_protocol_doc": true
+  },
+  "api_metrics": {
+    "input_tokens": 3147,
+    "output_tokens": 4903,
+    "latency_ms": 37870.12505531311
+  }
+}

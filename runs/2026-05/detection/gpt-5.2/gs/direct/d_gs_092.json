@@ -1,0 +1,51 @@
+{
+  "sample_id": "gs_092",
+  "dataset": "gs",
+  "prompt_type": "direct",
+  "model": "gpt-5.2",
+  "timestamp": "2026-05-25T08:07:12.237562+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "logic_error",
+    "vulnerable_functions": [
+      "setPayoutCalculator"
+    ],
+    "severity": "medium",
+    "description": "Swapping payout calculator during settlement uses new calculator's logic instead of the one active when tickets were purchased.",
+    "root_cause": "Swapping payout calculator during settlement uses new calculator's logic instead of the one active when tickets were purchased.",
+    "attack_scenario": "",
+    "fix_description": "Store active payout calculator in drawing state when initializeJackpot() is called.",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.78,
+    "vulnerabilities": [
+      {
+        "type": "Incorrect refund accounting (uses mutable global referralFee instead of purchase-time fee) enabling double-withdrawal in emergency mode",
+        "severity": "high",
+        "vulnerable_function": "emergencyRefundTickets",
+        "location": "Jackpot.emergencyRefundTickets",
+        "explanation": "Refund amounts for tickets purchased with a referral scheme are computed using the current global `referralFee` state variable, not the fee that was in effect when the ticket was bought. However, referral balances (`referralFees[referrer]`) are credited at purchase time based on the then-current `referralFee` in `_validateAndTrackReferrals`, and those credits are never clawed back during refunds. If `referralFee` is later decreased (a normal governance action) and emergency mode is enabled for the current drawing, buyers can receive a larger refund than intended while referrers still retain the previously-accrued (higher) referral fees. This creates a concrete overpayment path that can drain USDC from the contract (ultimately from LP funds/prize pool liquidity) and/or make the system insolvent in emergency mode.",
+        "attack_scenario": "1) At time T0, `referralFee` is high (e.g., 50%). Attacker buys many tickets in the current drawing via `buyTickets`, specifying a referral scheme where the attacker is the sole referrer with 100% split. This credits `referralFees[attacker] += 50% * ticketPrice * numTickets`.\n2) Later (T1), the owner/governance reduces `referralFee` to a lower value (e.g., 0% or 5%) as part of normal parameter updates.\n3) An operational issue triggers emergency mode for the same current drawing (owner calls `enableEmergencyMode`).\n4) Attacker calls `emergencyRefundTickets` for those ticket IDs. Refund is computed using the now-lower `referralFee`, so attacker receives close to the full ticketPrice per ticket.\n5) Attacker calls `claimReferralFees()` to withdraw the previously credited referral fees (based on the old, higher `referralFee`).\nResult: attacker extracts an extra amount roughly equal to (oldReferralFee - newReferralFee) * ticketPrice per refunded ticket, draining USDC from the contract.",
+        "suggested_fix": "Persist the referral fee rate used for each ticket purchase (or at least per drawing) and use that stored value during emergency refunds.\nConcrete options:\n- Add `uint256 referralFee` to `DrawingState` and set it in `_setNewDrawingState` (similar to `referralWinShare`). In `emergencyRefundTickets`, compute refund using `drawingState[ticketInfo.drawingId].referralFee` instead of the mutable global `referralFee`.\n- Alternatively, store the effective referral fee in the ticket NFT\u2019s tracked data at mint time.\nAdditionally, consider explicitly reversing referral fee accruals on refund (debit `referralFees[referrers[i]]`) if the intended behavior is \u201cfull buyer refund\u201d during emergencies."
+      }
+    ],
+    "overall_explanation": "A real, exploitable accounting bug exists in emergency ticket refunds: refund calculations use the current global `referralFee` instead of the purchase-time fee, while referral balances are credited at purchase-time and never reversed on refund. If `referralFee` decreases before emergency mode refunds, an attacker can obtain an inflated refund and still claim the earlier, higher referral fees, extracting excess USDC from the contract. Other reviewed paths (ticket purchase, winnings claim, jackpot run/callback) are generally protected by reentrancy guards and state checks in the provided code."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.78,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Incorrect refund accounting (uses mutable global referralFee instead of purchase-time fee) enabling double-withdrawal in emergency mode\",\n      \"severity\": \"high\",\n      \"vulnerable_function\": \"emergencyRefundTickets\",\n      \"location\": \"Jackpot.emergencyRefundTickets\",\n      \"explanation\": \"Refund amounts for tickets purchased with a referral scheme are computed using the current global `referralFee` state variable, not the fee that was in effect when the ticket was bought. However, referral balances (`referralFees[referrer]`) are credited at purchase time based on the then-current `referralFee` in `_validateAndTrackReferrals`, and those credits are never clawed back during refunds. If `referralFee` is later decreased (a normal governance action) and emergency mode is enabled for the current drawing, buyers can receive a larger refund than intended while referrers still retain the previously-accrued (higher) referral fees. This creates a concrete overpayment path that can drain USDC from the contract (ultimately from LP funds/prize pool liquidity) and/or make the system insolvent in emergency mode.\",\n      \"attack_scenario\": \"1) At time T0, `referralFee` is high (e.g., 50%). Attacker buys many tickets in the current drawing via `buyTickets`, specifying a referral scheme where the attacker is the sole referrer with 100% split. This credits `referralFees[attacker] += 50% * ticketPrice * numTickets`.\\n2) Later (T1), the owner/governance reduces `referralFee` to a lower value (e.g., 0% or 5%) as part of normal parameter updates.\\n3) An operational issue triggers emergency mode for the same current drawing (owner calls `enableEmergencyMode`).\\n4) Attacker calls `emergencyRefundTickets` for those ticket IDs. Refund is computed using the now-lower `referralFee`, so attacker receives close to the full ticketPrice per ticket.\\n5) Attacker calls `claimReferralFees()` to withdraw the previously credited referral fees (based on the old, higher `referralFee`).\\nResult: attacker extracts an extra amount roughly equal to (oldReferralFee - newReferralFee) * ticketPrice per refunded ticket, draining USDC from the contract.\",\n      \"suggested_fix\": \"Persist the referral fee rate used for each ticket purchase (or at least per drawing) and use that stored value during emergency refunds.\\nConcrete options:\\n- Add `uint256 referralFee` to `DrawingState` and set it in `_setNewDrawingState` (similar to `referralWinShare`). In `emergencyRefundTickets`, compute refund using `drawingState[ticketInfo.drawingId].referralFee` instead of the mutable global `referralFee`.\\n- Alternatively, store the effective referral fee in the ticket NFT\u2019s tracked data at mint time.\\nAdditionally, consider explicitly reversing referral fee accruals on refund (debit `referralFees[referrers[i]]`) if the intended behavior is \u201cfull buyer refund\u201d during emergencies.\"\n    }\n  ],\n  \"overall_explanation\": \"A real, exploitable accounting bug exists in emergency ticket refunds: refund calculations use the current global `referralFee` instead of the purchase-time fee, while referral balances are credited at purchase-time and never reversed on refund. If `referralFee` decreases before emergency mode refunds, an attacker can obtain an inflated refund and still claim the earlier, higher referral fees, extracting excess USDC from the contract. Other reviewed paths (ticket purchase, winnings claim, jackpot run/callback) are generally protected by reentrancy guards and state checks in the provided code.\"\n}"
+  },
+  "context_info": {
+    "has_context_files": false,
+    "context_file_count": 0,
+    "has_protocol_doc": false
+  },
+  "api_metrics": {
+    "input_tokens": 17875,
+    "output_tokens": 6234,
+    "latency_ms": 107865.95416069031
+  }
+}

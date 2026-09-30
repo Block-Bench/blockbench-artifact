@@ -1,0 +1,60 @@
+{
+  "sample_id": "gs_020",
+  "dataset": "gs",
+  "prompt_type": "context_protocol",
+  "model": "grok-4-fast",
+  "timestamp": "2026-01-05T14:00:03.844683+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "signature_replay",
+    "vulnerable_functions": [
+      "beforeSwap"
+    ],
+    "severity": "medium",
+    "description": "Both UniswapV4KEMHook and PancakeSwapInfinityKEMHook rebuild a quote digest by hashing sender, key, params.zeroForOne, maxAmountIn, maxExchangeRate, exchangeRateDenom, nonce, and expiryTime. The tuple ties the authorization to the router (sender), the full PoolKey (which includes the hook address), trade direction, price and input caps, nonce and expiry. Crucially, no domain separator is folded in: chain ID, deployment salt, and contract identity outside key are absent. If the same hook instance (or the same PoolKey) is deployed on multiple networks, as CREATE3-based salt mining allows, an attacker can lift any valid signature+nonce from chain A and replay it on chain B. Because the digest matches, SignatureChecker.isValidSignatureNow succeeds and the swap executes without the signer's intention. That breaks the core guarantee that signed quotes are single-instance authorizations, allowing cross-chain replay swaps.",
+    "root_cause": "Both UniswapV4KEMHook and PancakeSwapInfinityKEMHook rebuild a quote digest by hashing sender, key, params.zeroForOne, maxAmountIn, maxExchangeRate, exchangeRateDenom, nonce, and expiryTime. The tuple ties the authorization to the router (sender), the full PoolKey (which includes the hook address), trade direction, price and input caps, nonce and expiry. Crucially, no domain separator is folded in: chain ID, deployment salt, and contract identity outside key are absent. If the same hook instance (or the same PoolKey) is deployed on multiple networks, as CREATE3-based salt mining allows, an attacker can lift any valid signature+nonce from chain A and replay it on chain B. Because the digest matches, SignatureChecker.isValidSignatureNow succeeds and the swap executes without the signer's intention. That breaks the core guarantee that signed quotes are single-instance authorizations, allowing cross-chain replay swaps.",
+    "attack_scenario": "1. Kyber deploys UniswapV4KEMHook on Ethereum mainnet with a specific PoolKey\n2. Same hook (or same PoolKey configuration) is deployed on Arbitrum using CREATE3 salt mining to get matching address\n3. User requests a quote on Ethereum, quoteSigner signs: keccak256(abi.encode(sender, key, zeroForOne, maxAmountIn, maxExchangeRate, exchangeRateDenom, nonce, expiryTime))\n4. User broadcasts swap transaction on Ethereum mainnet\n5. Attacker observes the transaction in Ethereum mempool, extracts signature and hookData\n6. Attacker submits identical calldata on Arbitrum before expiryTime\n7. On Arbitrum: sender (router) matches, key matches (same pool configuration), all other parameters match\n8. SignatureChecker.isValidSignatureNow(quoteSigner, digest, signature) returns true\n9. Swap executes on Arbitrum without signer's intention\n10. If nonce != 0, Ethereum swap may still succeed (different nonce storage per chain), causing double execution",
+    "fix_description": "Introduce domain separation for the signed payload in both hooks. Adopt an EIP712 domain that at minimum commits to chainid. This ensures signatures are only valid on the intended chain.",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.95,
+    "vulnerabilities": [
+      {
+        "type": "Logic Error - Slippage Not Protected",
+        "severity": "high",
+        "vulnerable_function": "beforeSwap",
+        "location": "UniswapV4KEMHook.beforeSwap",
+        "explanation": "The function requires exact output swaps but only checks desired output <= maxAmountIn (units mismatch semantically; maxAmountIn intended as max input for desired output). No check on actual input after swap. This fails to enforce signed max input, allowing slippage where user pays more than quoted without revert. Discrepancy from protocol's guaranteed pricing intent.",
+        "attack_scenario": "1. Market maker signs quote with specific maxAmountIn for desired output. 2. MEV bot front-runs user's swap tx by trading to worsen price (increase input price). 3. User submits signed swap; beforeSwap passes invalid check. 4. Swap executes with actualIn > maxAmountIn; user overpays, no revert. Bot/miner extracts MEV via sandwich, but quote doesn't protect user.",
+        "suggested_fix": "Remove or correct the desired_out <= maxAmountIn check (likely meant as desired_out >= minAmountOut). In afterSwap, add require(actualIn <= maxAmountIn, ExceededMaxAmountIn); decode maxAmountIn from hookData and pass/compare."
+      },
+      {
+        "type": "Logic Error - Inverted Excess Gain Capture",
+        "severity": "high",
+        "vulnerable_function": "afterSwap",
+        "location": "UniswapV4KEMHook.afterSwap",
+        "explanation": "Sign errors make amountIn/amountOut negative, inverting condition: egAmount >0 when actual output < expected for input (worse rate/slippage), not better. Mints output tokens to hook worth ~extra_input * quoted_rate. When claimed, egRecipient extracts output value; pool gains extra input (low value at slipped price) but loses equivalent output, draining LPs. Intended for better execution gain absorption, but inverted. No balance for input side in mint/liquidityDelta.",
+        "attack_scenario": "1. User performs exact output swap during slippage (actualIn > expected). 2. afterSwap computes egAmount = extraIn * quoted_rate >0. 3. Mints egAmount output to hook; returns positive liquidityDelta. 4. Claimable account calls claimEgTokens with output token, amount=0 (full balance). 5. unlockCallback burns/mints, takes to egRecipient: free output tokens. LPs lose as extra input worth < egAmount at current price.",
+        "suggested_fix": "Fix signs: amountIn = params.zeroForOne ? delta.amount0() : delta.amount1(); amountOut = params.zeroForOne ? -delta.amount1() : -delta.amount0();. Invert condition to egAmount = amountOut > maxAmountOut ? amountOut - maxAmountOut : 0 (better rate). To absorb excess output, use poolManager.take instead of mint if egAmount>0. Ensure liquidityDelta = -int128(egAmount) or adjust per V4 docs for absorption. Add actualIn <= maxAmountIn check."
+      }
+    ],
+    "overall_explanation": "Contract has critical logic errors mismatching protocol intent for signed quotes/guaranteed pricing. Slippage unprotected; excess gain logic inverted, allowing egRecipient to drain LP value on worse rates via unbalanced mint/take. No owner compromise needed; exploitable by normal swaps/sandwich attacks. Other aspects (nonce, expiry, signature) secure."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.95,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Logic Error - Slippage Not Protected\",\n      \"severity\": \"high\",\n      \"vulnerable_function\": \"beforeSwap\",\n      \"location\": \"UniswapV4KEMHook.beforeSwap\",\n      \"explanation\": \"The function requires exact output swaps but only checks desired output <= maxAmountIn (units mismatch semantically; maxAmountIn intended as max input for desired output). No check on actual input after swap. This fails to enforce signed max input, allowing slippage where user pays more than quoted without revert. Discrepancy from protocol's guaranteed pricing intent.\",\n      \"attack_scenario\": \"1. Market maker signs quote with specific maxAmountIn for desired output. 2. MEV bot front-runs user's swap tx by trading to worsen price (increase input price). 3. User submits signed swap; beforeSwap passes invalid check. 4. Swap executes with actualIn > maxAmountIn; user overpays, no revert. Bot/miner extracts MEV via sandwich, but quote doesn't protect user.\",\n      \"suggested_fix\": \"Remove or correct the desired_out <= maxAmountIn check (likely meant as desired_out >= minAmountOut). In afterSwap, add require(actualIn <= maxAmountIn, ExceededMaxAmountIn); decode maxAmountIn from hookData and pass/compare.\"\n    },\n    {\n      \"type\": \"Logic Error - Inverted Excess Gain Capture\",\n      \"severity\": \"high\",\n      \"vulnerable_function\": \"afterSwap\",\n      \"location\": \"UniswapV4KEMHook.afterSwap\",\n      \"explanation\": \"Sign errors make amountIn/amountOut negative, inverting condition: egAmount >0 when actual output < expected for input (worse rate/slippage), not better. Mints output tokens to hook worth ~extra_input * quoted_rate. When claimed, egRecipient extracts output value; pool gains extra input (low value at slipped price) but loses equivalent output, draining LPs. Intended for better execution gain absorption, but inverted. No balance for input side in mint/liquidityDelta.\",\n      \"attack_scenario\": \"1. User performs exact output swap during slippage (actualIn > expected). 2. afterSwap computes egAmount = extraIn * quoted_rate >0. 3. Mints egAmount output to hook; returns positive liquidityDelta. 4. Claimable account calls claimEgTokens with output token, amount=0 (full balance). 5. unlockCallback burns/mints, takes to egRecipient: free output tokens. LPs lose as extra input worth < egAmount at current price.\",\n      \"suggested_fix\": \"Fix signs: amountIn = params.zeroForOne ? delta.amount0() : delta.amount1(); amountOut = params.zeroForOne ? -delta.amount1() : -delta.amount0();. Invert condition to egAmount = amountOut > maxAmountOut ? amountOut - maxAmountOut : 0 (better rate). To absorb excess output, use poolManager.take instead of mint if egAmount>0. Ensure liquidityDelta = -int128(egAmount) or adjust per V4 docs for absorption. Add actualIn <= maxAmountIn check.\"\n    }\n  ],\n  \"overall_explanation\": \"Contract has critical logic errors mismatching protocol intent for signed quotes/guaranteed pricing. Slippage unprotected; excess gain logic inverted, allowing egRecipient to drain LP value on worse rates via unbalanced mint/take. No owner compromise needed; exploitable by normal swaps/sandwich attacks. Other aspects (nonce, expiry, signature) secure.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": false,
+    "context_file_count": 0,
+    "has_protocol_doc": true
+  },
+  "api_metrics": {
+    "input_tokens": 2357,
+    "output_tokens": 9526,
+    "latency_ms": 83375.39196014404
+  }
+}

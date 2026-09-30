@@ -1,0 +1,60 @@
+{
+  "sample_id": "gs_029",
+  "dataset": "gs",
+  "prompt_type": "direct",
+  "model": "claude-opus-4-5",
+  "timestamp": "2026-01-05T12:56:00.425858+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "signature_replay",
+    "vulnerable_functions": [
+      "execute"
+    ],
+    "severity": "high",
+    "description": "When a session call with BEHAVIOR_REVERT_ON_ERROR fails, the transaction reverts but nonce is not consumed. The signature remains valid and can be replayed for partial calls. Session signatures are validated per-call using individual call hashes, enabling partial replay. Frontrunners can execute subsets of calls to grief or cause financial loss.",
+    "root_cause": "When a session call with BEHAVIOR_REVERT_ON_ERROR fails, the transaction reverts but nonce is not consumed. The signature remains valid and can be replayed for partial calls. Session signatures are validated per-call using individual call hashes, enabling partial replay. Frontrunners can execute subsets of calls to grief or cause financial loss.",
+    "attack_scenario": "Original payload: Calls [A, B, C] with signatures [SigA, SigB, SigC]. Execution: [A succeed, B succeed, C revert]. Result: Revert, nonce unused. Attack: Replay [A, B] with [SigA, SigB]. PoC: File POC.t.sol with test testSubmissionValidity. It builds a 2-call payload, expects revert on second call, then replays partial payload successfully.",
+    "fix_description": "Bind session call signatures to the complete payload hash to prevent partial signature replay.",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.85,
+    "vulnerabilities": [
+      {
+        "type": "Arbitrary Delegatecall",
+        "severity": "critical",
+        "vulnerable_function": "_execute",
+        "location": "Calls._execute",
+        "explanation": "The contract allows delegatecall to arbitrary addresses specified in the payload. When `call.delegateCall` is true, the contract executes `LibOptim.delegatecall(call.to, ...)` where `call.to` is user-controlled (after signature validation). A delegatecall executes code from the target contract in the context of the calling contract, meaning a malicious target can modify the wallet's storage, drain funds, or change ownership. While signature validation exists, if the signer is compromised or if there's any signature replay/validation weakness, an attacker can execute arbitrary code in the wallet's context.",
+        "attack_scenario": "1. Attacker deploys a malicious contract that implements `handleSequenceDelegateCall` but contains code to transfer ownership or drain funds. 2. Attacker obtains a valid signature (through phishing, key compromise, or signature validation bypass). 3. Attacker crafts a payload with `delegateCall=true` and `to=malicious_contract`. 4. The delegatecall executes the malicious contract's code in the wallet's context. 5. The malicious contract modifies storage slots to change ownership or directly transfers all ETH/tokens to the attacker.",
+        "suggested_fix": "Implement a whitelist of allowed delegatecall targets. Only permit delegatecalls to pre-approved, audited extension contracts. Add: `mapping(address => bool) public allowedDelegateTargets;` and check `require(allowedDelegateTargets[call.to], \"Unauthorized delegate target\");` before executing delegatecalls."
+      },
+      {
+        "type": "Gas Griefing / Insufficient Gas Validation",
+        "severity": "medium",
+        "vulnerable_function": "_execute",
+        "location": "Calls._execute",
+        "explanation": "When `gasLimit == 0`, the contract passes `gasleft()` as the gas limit. However, the 63/64 rule means only 63/64 of remaining gas is forwarded to subcalls. If a call with `gasLimit=0` is followed by another call requiring specific gas, the second call may fail unexpectedly. Additionally, the gas check `gasleft() < gasLimit` doesn't account for the overhead of the call itself, potentially causing out-of-gas in edge cases.",
+        "attack_scenario": "1. User creates a payload with multiple calls where the first call has `gasLimit=0` and consumes most gas. 2. The second call has a specific `gasLimit` requirement. 3. Due to the 63/64 rule and gas consumption, the second call fails even though the user provided what they believed was sufficient gas. 4. If `behaviorOnError` is set to ignore, the transaction succeeds but critical operations are skipped.",
+        "suggested_fix": "Add a buffer to gas checks: `require(gasleft() >= gasLimit + CALL_OVERHEAD, \"Insufficient gas\");` where CALL_OVERHEAD accounts for the call setup costs. Consider requiring explicit gas limits for all calls in security-critical scenarios."
+      }
+    ],
+    "overall_explanation": "The Calls contract has a critical vulnerability in its delegatecall functionality. While the contract implements signature validation and reentrancy protection, it allows delegatecalls to arbitrary addresses specified in signed payloads. This is dangerous because delegatecall executes external code in the wallet's context, allowing storage manipulation. The security relies entirely on signature validation - if compromised, an attacker gains full control. A secondary medium-severity issue exists in gas handling where the 63/64 rule and insufficient overhead accounting could cause unexpected failures. The contract should implement a whitelist for delegatecall targets and improve gas validation."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.85,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Arbitrary Delegatecall\",\n      \"severity\": \"critical\",\n      \"vulnerable_function\": \"_execute\",\n      \"location\": \"Calls._execute\",\n      \"explanation\": \"The contract allows delegatecall to arbitrary addresses specified in the payload. When `call.delegateCall` is true, the contract executes `LibOptim.delegatecall(call.to, ...)` where `call.to` is user-controlled (after signature validation). A delegatecall executes code from the target contract in the context of the calling contract, meaning a malicious target can modify the wallet's storage, drain funds, or change ownership. While signature validation exists, if the signer is compromised or if there's any signature replay/validation weakness, an attacker can execute arbitrary code in the wallet's context.\",\n      \"attack_scenario\": \"1. Attacker deploys a malicious contract that implements `handleSequenceDelegateCall` but contains code to transfer ownership or drain funds. 2. Attacker obtains a valid signature (through phishing, key compromise, or signature validation bypass). 3. Attacker crafts a payload with `delegateCall=true` and `to=malicious_contract`. 4. The delegatecall executes the malicious contract's code in the wallet's context. 5. The malicious contract modifies storage slots to change ownership or directly transfers all ETH/tokens to the attacker.\",\n      \"suggested_fix\": \"Implement a whitelist of allowed delegatecall targets. Only permit delegatecalls to pre-approved, audited extension contracts. Add: `mapping(address => bool) public allowedDelegateTargets;` and check `require(allowedDelegateTargets[call.to], \\\"Unauthorized delegate target\\\");` before executing delegatecalls.\"\n    },\n    {\n      \"type\": \"Gas Griefing / Insufficient Gas Validation\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"_execute\",\n      \"location\": \"Calls._execute\",\n      \"explanation\": \"When `gasLimit == 0`, the contract passes `gasleft()` as the gas limit. However, the 63/64 rule means only 63/64 of remaining gas is forwarded to subcalls. If a call with `gasLimit=0` is followed by another call requiring specific gas, the second call may fail unexpectedly. Additionally, the gas check `gasleft() < gasLimit` doesn't account for the overhead of the call itself, potentially causing out-of-gas in edge cases.\",\n      \"attack_scenario\": \"1. User creates a payload with multiple calls where the first call has `gasLimit=0` and consumes most gas. 2. The second call has a specific `gasLimit` requirement. 3. Due to the 63/64 rule and gas consumption, the second call fails even though the user provided what they believed was sufficient gas. 4. If `behaviorOnError` is set to ignore, the transaction succeeds but critical operations are skipped.\",\n      \"suggested_fix\": \"Add a buffer to gas checks: `require(gasleft() >= gasLimit + CALL_OVERHEAD, \\\"Insufficient gas\\\");` where CALL_OVERHEAD accounts for the call setup costs. Consider requiring explicit gas limits for all calls in security-critical scenarios.\"\n    }\n  ],\n  \"overall_explanation\": \"The Calls contract has a critical vulnerability in its delegatecall functionality. While the contract implements signature validation and reentrancy protection, it allows delegatecalls to arbitrary addresses specified in signed payloads. This is dangerous because delegatecall executes external code in the wallet's context, allowing storage manipulation. The security relies entirely on signature validation - if compromised, an attacker gains full control. A secondary medium-severity issue exists in gas handling where the 63/64 rule and insufficient overhead accounting could cause unexpected failures. The contract should implement a whitelist for delegatecall targets and improve gas validation.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": false,
+    "context_file_count": 0,
+    "has_protocol_doc": false
+  },
+  "api_metrics": {
+    "input_tokens": 2132,
+    "output_tokens": 942,
+    "latency_ms": 17294.947624206543
+  }
+}

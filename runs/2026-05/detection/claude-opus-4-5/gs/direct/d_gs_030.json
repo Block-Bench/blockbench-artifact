@@ -1,0 +1,60 @@
+{
+  "sample_id": "gs_030",
+  "dataset": "gs",
+  "prompt_type": "direct",
+  "model": "claude-opus-4-5",
+  "timestamp": "2026-05-25T06:36:52.629955+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "signature_replay",
+    "vulnerable_functions": [
+      "hashCallWithReplayProtection"
+    ],
+    "severity": "medium",
+    "description": "SessionSig.hashCallWithReplayProtection omits wallet address in hash, allowing signatures for one wallet to replay on another with same config and nonce. SessionManager.recoverSapientSignature and BaseAuth.signatureValidation do not bind to msg.sender.",
+    "root_cause": "SessionSig.hashCallWithReplayProtection omits wallet address in hash, allowing signatures for one wallet to replay on another with same config and nonce. SessionManager.recoverSapientSignature and BaseAuth.signatureValidation do not bind to msg.sender.",
+    "attack_scenario": "Sign payload for Wallet A, replay on Wallet B (same config, nonce). Drains both wallets. PoC: test/extensions/sessions/SessionReplay.t.sol, run forge test --match-test test_crossWalletSessionReplayDrainsSiblingWallet -vv. Logs show attacker draining two wallets.",
+    "fix_description": "Include address(this) in hashCallWithReplayProtection. Update SDK to hash (wallet, chainId, space, nonce, callIdx, call details).",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.85,
+    "vulnerabilities": [
+      {
+        "type": "Signature Malleability / Missing Validation",
+        "severity": "medium",
+        "vulnerable_function": "recoverSignature",
+        "location": "SessionSig.recoverSignature",
+        "explanation": "The ecrecover function returns address(0) for invalid signatures, but the code only checks for address(0) on the session signer recovery, not on the identity signer recovery for attestations. When recovering the identity signer from attestation signatures, if ecrecover returns address(0) due to an invalid signature, and sig.identitySigner happens to be address(0) at that point (which shouldn't happen due to earlier check, but the check happens AFTER configuration parsing), the comparison would pass. However, the more critical issue is that the identity signer check happens before attestation parsing, so if the configuration doesn't set an identity signer, the code reverts. But if a malformed signature causes ecrecover to return address(0), and the identity signer was legitimately set, the check `recoveredIdentitySigner != sig.identitySigner` would correctly fail. The actual vulnerability is that ecrecover can return arbitrary addresses for malformed signatures with certain (r,s,v) combinations, potentially allowing signature forgery if the attacker can craft inputs that recover to the expected identity signer address.",
+        "attack_scenario": "1. Attacker observes a valid attestation signed by the identity signer. 2. Attacker crafts a different attestation with malicious permissions. 3. Using ECDSA malleability (s-value manipulation) or by finding colliding signatures, attacker attempts to create a signature that recovers to the same identity signer address for the malicious attestation. 4. If successful, the malicious attestation would be accepted as valid.",
+        "suggested_fix": "Add explicit validation that recovered addresses are not address(0) for all ecrecover calls: `if (recoveredIdentitySigner == address(0)) revert SessionErrors.InvalidIdentitySigner();` before the comparison check. Additionally, consider using OpenZeppelin's ECDSA library which includes malleability protection by checking s-value is in the lower half of the curve order."
+      },
+      {
+        "type": "Array Index Out of Bounds",
+        "severity": "medium",
+        "vulnerable_function": "recoverConfiguration",
+        "location": "SessionSig.recoverConfiguration",
+        "explanation": "In recoverConfiguration, when processing FLAG_BRANCH, the code copies permissions from branchSig.sessionPermissions to sig.sessionPermissions using `sig.sessionPermissions[permissionsCount++] = branchSig.sessionPermissions[i]`. The initial array size is calculated as `encoded.length / MIN_ENCODED_PERMISSION_SIZE`. However, when branches are processed recursively, the branch's permissions are added to the parent's array. If a deeply nested branch structure contains more permissions than the parent's initial allocation anticipated, this could cause an out-of-bounds write. The assembly block at the end only adjusts the length, but doesn't prevent the overflow during population.",
+        "attack_scenario": "1. Attacker crafts an encoded configuration with minimal top-level data (small encoded.length) but with nested branches containing many permissions. 2. The initial maxPermissionsSize calculation underestimates the total permissions needed. 3. When branch permissions are copied, the write exceeds the allocated array bounds. 4. This could corrupt adjacent memory, potentially leading to unexpected behavior or exploitation.",
+        "suggested_fix": "Calculate the maximum possible permissions more accurately by considering the recursive branch structure, or use a dynamic array approach. Alternatively, add bounds checking before each write: `require(permissionsCount < sig.sessionPermissions.length, 'Permissions overflow');`"
+      }
+    ],
+    "overall_explanation": "The SessionSig library handles complex signature verification for session-based authentication. Two medium-severity issues were identified: (1) The ecrecover calls lack comprehensive validation - while session signer recovery checks for address(0), the pattern could be strengthened with ECDSA malleability protection. (2) The array allocation for sessionPermissions in recoverConfiguration may be insufficient when processing nested branches, potentially causing out-of-bounds writes. The code does have good practices like checking for duplicate blacklists and identity signers, and validating attestation indices. The replay protection mechanism using chainId, space, nonce, and callIdx appears sound."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.85,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Signature Malleability / Missing Validation\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"recoverSignature\",\n      \"location\": \"SessionSig.recoverSignature\",\n      \"explanation\": \"The ecrecover function returns address(0) for invalid signatures, but the code only checks for address(0) on the session signer recovery, not on the identity signer recovery for attestations. When recovering the identity signer from attestation signatures, if ecrecover returns address(0) due to an invalid signature, and sig.identitySigner happens to be address(0) at that point (which shouldn't happen due to earlier check, but the check happens AFTER configuration parsing), the comparison would pass. However, the more critical issue is that the identity signer check happens before attestation parsing, so if the configuration doesn't set an identity signer, the code reverts. But if a malformed signature causes ecrecover to return address(0), and the identity signer was legitimately set, the check `recoveredIdentitySigner != sig.identitySigner` would correctly fail. The actual vulnerability is that ecrecover can return arbitrary addresses for malformed signatures with certain (r,s,v) combinations, potentially allowing signature forgery if the attacker can craft inputs that recover to the expected identity signer address.\",\n      \"attack_scenario\": \"1. Attacker observes a valid attestation signed by the identity signer. 2. Attacker crafts a different attestation with malicious permissions. 3. Using ECDSA malleability (s-value manipulation) or by finding colliding signatures, attacker attempts to create a signature that recovers to the same identity signer address for the malicious attestation. 4. If successful, the malicious attestation would be accepted as valid.\",\n      \"suggested_fix\": \"Add explicit validation that recovered addresses are not address(0) for all ecrecover calls: `if (recoveredIdentitySigner == address(0)) revert SessionErrors.InvalidIdentitySigner();` before the comparison check. Additionally, consider using OpenZeppelin's ECDSA library which includes malleability protection by checking s-value is in the lower half of the curve order.\"\n    },\n    {\n      \"type\": \"Array Index Out of Bounds\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"recoverConfiguration\",\n      \"location\": \"SessionSig.recoverConfiguration\",\n      \"explanation\": \"In recoverConfiguration, when processing FLAG_BRANCH, the code copies permissions from branchSig.sessionPermissions to sig.sessionPermissions using `sig.sessionPermissions[permissionsCount++] = branchSig.sessionPermissions[i]`. The initial array size is calculated as `encoded.length / MIN_ENCODED_PERMISSION_SIZE`. However, when branches are processed recursively, the branch's permissions are added to the parent's array. If a deeply nested branch structure contains more permissions than the parent's initial allocation anticipated, this could cause an out-of-bounds write. The assembly block at the end only adjusts the length, but doesn't prevent the overflow during population.\",\n      \"attack_scenario\": \"1. Attacker crafts an encoded configuration with minimal top-level data (small encoded.length) but with nested branches containing many permissions. 2. The initial maxPermissionsSize calculation underestimates the total permissions needed. 3. When branch permissions are copied, the write exceeds the allocated array bounds. 4. This could corrupt adjacent memory, potentially leading to unexpected behavior or exploitation.\",\n      \"suggested_fix\": \"Calculate the maximum possible permissions more accurately by considering the recursive branch structure, or use a dynamic array approach. Alternatively, add bounds checking before each write: `require(permissionsCount < sig.sessionPermissions.length, 'Permissions overflow');`\"\n    }\n  ],\n  \"overall_explanation\": \"The SessionSig library handles complex signature verification for session-based authentication. Two medium-severity issues were identified: (1) The ecrecover calls lack comprehensive validation - while session signer recovery checks for address(0), the pattern could be strengthened with ECDSA malleability protection. (2) The array allocation for sessionPermissions in recoverConfiguration may be insufficient when processing nested branches, potentially causing out-of-bounds writes. The code does have good practices like checking for duplicate blacklists and identity signers, and validating attestation indices. The replay protection mechanism using chainId, space, nonce, and callIdx appears sound.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": true,
+    "context_file_count": 1,
+    "has_protocol_doc": false
+  },
+  "api_metrics": {
+    "input_tokens": 9437,
+    "output_tokens": 1055,
+    "latency_ms": 21513.050079345703
+  }
+}

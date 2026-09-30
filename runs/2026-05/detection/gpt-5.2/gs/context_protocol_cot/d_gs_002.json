@@ -1,0 +1,51 @@
+{
+  "sample_id": "gs_002",
+  "dataset": "gs",
+  "prompt_type": "context_protocol_cot",
+  "model": "gpt-5.2",
+  "timestamp": "2026-05-25T16:56:52.250021+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "logic_error",
+    "vulnerable_functions": [
+      "getSwapFee"
+    ],
+    "severity": "medium",
+    "description": "Governance can configure `DynamicSwapFeeModule` with fees up to 50%, but `CLFactory.getSwapFee` discards any value above 100_000 ppm (10%) and falls back to the tick-spacing default (often 500 ppm = 0.05%) without reverting or logging. Operators see the module reporting 20%, yet users continue paying the tiny default fee. The silent fallback misleads governance into believing higher fees are active. Impact - Governance believes a protective high fee is set (e.g., during launch anti-MEV), but the effective fee drops back to the default (e.g., 0.05%). - Traders are charged far less than intended, defeating protective or revenue objectives. - The misconfiguration has no on-chain signal, so the mistake can persist unnoticed. Root Cause - getSwapFee checks fee <= 100_000 ; larger values are ignored and the function returns tickSpacingToFee . - The module itself allows feeCap up to 500_000 (50%), so governance can set a value the factory immediately discards in favor of the default.",
+    "root_cause": "Governance can configure `DynamicSwapFeeModule` with fees up to 50%, but `CLFactory.getSwapFee` discards any value above 100_000 ppm (10%) and falls back to the tick-spacing default (often 500 ppm = 0.05%) without reverting or logging. Operators see the module reporting 20%, yet users continue paying the tiny default fee. The silent fallback misleads governance into believing higher fees are active. Impact - Governance believes a protective high fee is set (e.g., during launch anti-MEV), but the effective fee drops back to the default (e.g., 0.05%). - Traders are charged far less than intended, defeating protective or revenue objectives. - The misconfiguration has no on-chain signal, so the mistake can persist unnoticed. Root Cause - getSwapFee checks fee <= 100_000 ; larger values are ignored and the function returns tickSpacingToFee . - The module itself allows feeCap up to 500_000 (50%), so governance can set a value the factory immediately discards in favor of the default.",
+    "attack_scenario": "cd cl forge test --match-path test/PoC_DynamicFee_ClampToDefault.t.sol -vvv The PoC lifts the module cap, sets a 20% custom fee, and shows that `DynamicSwapFeeModule.getFee` returns 200_000 while `CLFactory.getSwapFee` still returns the base 500 ppm. PoC source ( `cl/test/PoC_DynamicFee_ClampToDefault.t.sol` ): // SPDX-License-Identifier: MIT pragma solidity 0.7.6; pragma abicoder v2; import \"forge-std/Test.sol\"; import {C4PoCTestbed} from \"./C4PoCTestbed.t.sol\"; import {DynamicSwapFeeModule} from \"contracts/core/fees/DynamicSwapFeeModule.sol\"; contract PoC_DynamicFee_ClampToDefault is C4PoCTestbed { address internal pool; function setUp() public override { super.setUp(); pool = poolFactory.createPool(USDC, DAI, 100, uint160(2 ** 96)); require(pool != address(0), \"pool not created\"); } function testFactoryClampsFeeAboveTenPercent() public { address manager = poolFactory.swapFeeManager(); vm.prank(manager); swapFeeModule.setFeeCap(pool, 500_000); // raise module cap to 50% vm.prank(manager); swapFeeModule.setScalingFactor(pool, 1); // ensure positive TWAP delta doesn't zero fee uint24 highFee = 200_000; // 20% vm.prank(manager); swapFeeModule.setCustomFee(pool, highFee); uint24 moduleFee = swapFeeModule.getFee(pool); assertEq(uint256(moduleFee), uint256(highFee), \"module reports configured fee\"); uint24 factoryFee = poolFactory.getSwapFee(pool); assertEq(uint256(factoryFee), 500, \"factory silently clamps to tick-spacing default\"); } }",
+    "fix_description": "Either revert when the module returns > 100_000 or raise the factory ceiling to match the module\u2019s cap. Emit events or add admin tooling to surface out-of-range configurations so operators can correct them. Hybra Finance mitigated: Added setMaxFee() function to make the fee cap configurable by the owner (up to 50%). This replaces the hardcoded limit and allows governance to adjust the maximum dynamic fee when needed.",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.9,
+    "vulnerabilities": [
+      {
+        "type": "logic_error / fee-cap mismatch causing silent fallback",
+        "severity": "medium",
+        "vulnerable_function": "getSwapFee",
+        "location": "CLFactory.getSwapFee",
+        "explanation": "CLFactory queries an external swapFeeModule for a pool-specific swap fee, but it only accepts the module\u2019s returned value if `fee <= 100_000` (10%). If the module returns any higher value, the factory silently ignores it and falls back to `tickSpacingToFee[CLPool(pool).tickSpacing()]` (often a much smaller default like 500 ppm = 0.05%). This creates a mismatch between governance/operator intent (module configured for e.g. 20%\u201350%) and actual fees charged on-chain (default low fee), with no revert or event to signal misconfiguration. The result is an exploitable economic condition: traders can transact at far lower fees than intended during periods where high fees are meant to be protective (anti-MEV / launch protection) or revenue-generating.",
+        "attack_scenario": "1) Governance/operators configure DynamicSwapFeeModule to return a swap fee > 100_000 ppm (e.g., 200_000 = 20%) for a target pool, believing the pool will charge that fee.\n2) Users/traders call swaps against the pool during the intended high-fee period.\n3) The pool queries `factory.getSwapFee(address(this))` (directly or indirectly) and receives the fallback tickSpacing fee (e.g., 500 ppm), because the module\u2019s >10% value is discarded.\n4) The trader pays the much lower fee, enabling strategies the high fee was meant to deter (e.g., aggressive MEV/arbitrage at launch) and reducing protocol revenue versus governance expectations.",
+        "suggested_fix": "Make fee ceilings consistent and non-silent. Options:\n- Revert when the module returns an out-of-range value: `require(fee <= MAX_SWAP_FEE, \"FEE_TOO_HIGH\");`\n- Or raise the factory ceiling to match the module\u2019s allowed cap (e.g., up to 500_000) and validate accordingly.\n- Emit an event or provide an explicit on-chain signal when an out-of-range fee is returned and fallback is used, so misconfiguration is detectable."
+      }
+    ],
+    "overall_explanation": "The core deploy/ownership logic is straightforward, and no concrete permissionless takeover/reentrancy paths are evident in the provided code. The primary exploitable issue is an intent/implementation discrepancy in `getSwapFee`: swap fee module outputs above 10% are silently ignored, causing an unintended low-fee fallback. This can be exploited economically by traders whenever governance believes a protective high fee is active but the contract continues charging the low default."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.9,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"logic_error / fee-cap mismatch causing silent fallback\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"getSwapFee\",\n      \"location\": \"CLFactory.getSwapFee\",\n      \"explanation\": \"CLFactory queries an external swapFeeModule for a pool-specific swap fee, but it only accepts the module\u2019s returned value if `fee <= 100_000` (10%). If the module returns any higher value, the factory silently ignores it and falls back to `tickSpacingToFee[CLPool(pool).tickSpacing()]` (often a much smaller default like 500 ppm = 0.05%). This creates a mismatch between governance/operator intent (module configured for e.g. 20%\u201350%) and actual fees charged on-chain (default low fee), with no revert or event to signal misconfiguration. The result is an exploitable economic condition: traders can transact at far lower fees than intended during periods where high fees are meant to be protective (anti-MEV / launch protection) or revenue-generating.\",\n      \"attack_scenario\": \"1) Governance/operators configure DynamicSwapFeeModule to return a swap fee > 100_000 ppm (e.g., 200_000 = 20%) for a target pool, believing the pool will charge that fee.\\n2) Users/traders call swaps against the pool during the intended high-fee period.\\n3) The pool queries `factory.getSwapFee(address(this))` (directly or indirectly) and receives the fallback tickSpacing fee (e.g., 500 ppm), because the module\u2019s >10% value is discarded.\\n4) The trader pays the much lower fee, enabling strategies the high fee was meant to deter (e.g., aggressive MEV/arbitrage at launch) and reducing protocol revenue versus governance expectations.\",\n      \"suggested_fix\": \"Make fee ceilings consistent and non-silent. Options:\\n- Revert when the module returns an out-of-range value: `require(fee <= MAX_SWAP_FEE, \\\"FEE_TOO_HIGH\\\");`\\n- Or raise the factory ceiling to match the module\u2019s allowed cap (e.g., up to 500_000) and validate accordingly.\\n- Emit an event or provide an explicit on-chain signal when an out-of-range fee is returned and fallback is used, so misconfiguration is detectable.\"\n    }\n  ],\n  \"overall_explanation\": \"The core deploy/ownership logic is straightforward, and no concrete permissionless takeover/reentrancy paths are evident in the provided code. The primary exploitable issue is an intent/implementation discrepancy in `getSwapFee`: swap fee module outputs above 10% are silently ignored, causing an unintended low-fee fallback. This can be exploited economically by traders whenever governance believes a protective high fee is active but the contract continues charging the low default.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": false,
+    "context_file_count": 0,
+    "has_protocol_doc": false
+  },
+  "api_metrics": {
+    "input_tokens": 3734,
+    "output_tokens": 1178,
+    "latency_ms": 19887.97903060913
+  }
+}

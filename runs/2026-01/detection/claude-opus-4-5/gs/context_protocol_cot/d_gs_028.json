@@ -1,0 +1,69 @@
+{
+  "sample_id": "gs_028",
+  "dataset": "gs",
+  "prompt_type": "context_protocol_cot",
+  "model": "claude-opus-4-5",
+  "timestamp": "2026-01-05T13:52:31.596246+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "access_control",
+    "vulnerable_functions": [
+      "recover"
+    ],
+    "severity": "high",
+    "description": "When a wallet is behind a checkpointer and a chained signature is used with bit 6 (checkpointer usage flag) set to zero, BaseSig.recover skips the checkpointer validation block (BaseSig.sol:88-106). This leaves _checkpointer and snapshot unset (zero-valued). In recoverChained, the checkpointer is ignored, and the signature validation passes even if the checkpointer should be enforced. The final validation succeeds because snapshot.imageHash == bytes32(0) as the checkpointer is ignored.",
+    "root_cause": "When a wallet is behind a checkpointer and a chained signature is used with bit 6 (checkpointer usage flag) set to zero, BaseSig.recover skips the checkpointer validation block (BaseSig.sol:88-106). This leaves _checkpointer and snapshot unset (zero-valued). In recoverChained, the checkpointer is ignored, and the signature validation passes even if the checkpointer should be enforced. The final validation succeeds because snapshot.imageHash == bytes32(0) as the checkpointer is ignored.",
+    "attack_scenario": "An evicted signer can sign a payload valid under stale wallet configuration and bypass checkpointer validation. PoC: Add test case to BaseSigTest and run forge test --match-test test_PoC_checkpointer_bypass. The test constructs a chained signature with checkpointer disabled, mocks the checkpointer response, and asserts successful recovery with correct image hash.",
+    "fix_description": "Do not permit checkpointer to be disabled (bit 6 unset) if chained signature is used. Revert in this case with custom error. Example fix in BaseSig.sol:\nif (signatureFlag & 0x40 == 0) {\n    revert MissingCheckpointer();\n}",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.85,
+    "vulnerabilities": [
+      {
+        "type": "Signature Malleability / Invalid Signature Acceptance",
+        "severity": "high",
+        "vulnerable_function": "recoverBranch",
+        "location": "BaseSig.recoverBranch - FLAG_SIGNATURE_HASH and FLAG_SIGNATURE_ETH_SIGN handlers",
+        "explanation": "When ecrecover fails (due to invalid signature parameters), it returns address(0) instead of reverting. The code does not check if the recovered address is address(0). This means an invalid signature will be treated as a valid signature from address(0), and its weight will be added to the total weight. If the wallet configuration includes address(0) as a signer (which could happen accidentally or through a misconfiguration), or if the attacker can craft signatures that recover to address(0) and accumulate enough weight, they could bypass signature validation.",
+        "attack_scenario": "1. Attacker identifies a wallet where the merkle tree configuration accidentally includes address(0) as a signer with some weight (e.g., due to uninitialized storage or configuration error). 2. Attacker crafts a signature with invalid parameters that causes ecrecover to return address(0). 3. The weight associated with address(0) is added to the total weight. 4. If this weight meets the threshold, the attacker can execute arbitrary transactions on the wallet without any valid private key.",
+        "suggested_fix": "Add a check after ecrecover to ensure the recovered address is not address(0): `address addr = ecrecover(_opHash, v, r, s); require(addr != address(0), 'Invalid signature');`"
+      },
+      {
+        "type": "Unchecked External Call Return Value",
+        "severity": "medium",
+        "vulnerable_function": "recoverBranch",
+        "location": "BaseSig.recoverBranch - FLAG_SIGNATURE_SAPIENT and FLAG_SIGNATURE_SAPIENT_COMPACT handlers",
+        "explanation": "The ISapient and ISapientCompact external calls return a bytes32 imageHash that is directly used in the merkle tree computation without validation. If the external contract returns bytes32(0) or any arbitrary value (either maliciously or due to a bug), this could lead to incorrect imageHash computation. Unlike ERC1271 which has a magic value check, Sapient signatures rely entirely on the external contract's return value being correct.",
+        "attack_scenario": "1. A malicious or buggy Sapient signer contract is added to the wallet configuration. 2. When recoverSapientSignature is called, it returns an arbitrary imageHash. 3. This incorrect imageHash is used in the merkle tree, potentially allowing the attacker to manipulate the final imageHash to match a known configuration. 4. The attacker could potentially authorize transactions they shouldn't be able to.",
+        "suggested_fix": "Consider adding validation that the returned sapientImageHash is not bytes32(0), or implement additional checks to verify the Sapient contract's response is legitimate. Document clearly that Sapient signers must be trusted contracts."
+      },
+      {
+        "type": "Potential DoS via External Call",
+        "severity": "medium",
+        "vulnerable_function": "recoverBranch",
+        "location": "BaseSig.recoverBranch - FLAG_SIGNATURE_ERC1271, FLAG_SIGNATURE_SAPIENT, FLAG_SIGNATURE_SAPIENT_COMPACT handlers",
+        "explanation": "External calls to ERC1271, ISapient, and ISapientCompact contracts are made without gas limits. A malicious signer contract could consume all gas, causing the entire signature validation to fail. This could be used to grief legitimate transactions or prevent wallet operations.",
+        "attack_scenario": "1. Attacker gets added as an ERC1271 or Sapient signer to a multi-sig wallet (perhaps as a minority signer). 2. Attacker deploys a malicious contract that consumes all gas when isValidSignature or recoverSapientSignature is called. 3. Any transaction requiring signature validation will fail due to out-of-gas, effectively locking the wallet until the malicious signer is removed (which itself requires a valid signature).",
+        "suggested_fix": "Consider using a gas-limited call for external signature validation, or implement a mechanism to skip/timeout on external calls that consume excessive gas. Alternatively, document this risk clearly so wallet operators understand the trust assumptions when adding external signers."
+      }
+    ],
+    "overall_explanation": "The BaseSig library implements complex signature validation logic for a smart contract wallet system. The most significant vulnerability is the lack of address(0) validation after ecrecover calls, which could allow invalid signatures to be accepted if address(0) is somehow part of the wallet configuration. Additionally, the external calls to Sapient contracts lack return value validation, and all external calls (ERC1271, Sapient) are made without gas limits, creating potential DoS vectors. The chained signature and checkpoint logic appears sound, with proper ordering checks and snapshot validation. The merkle tree construction for the imageHash follows a consistent pattern, though the reliance on external contracts for signature validation introduces trust assumptions that should be carefully documented."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.85,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Signature Malleability / Invalid Signature Acceptance\",\n      \"severity\": \"high\",\n      \"vulnerable_function\": \"recoverBranch\",\n      \"location\": \"BaseSig.recoverBranch - FLAG_SIGNATURE_HASH and FLAG_SIGNATURE_ETH_SIGN handlers\",\n      \"explanation\": \"When ecrecover fails (due to invalid signature parameters), it returns address(0) instead of reverting. The code does not check if the recovered address is address(0). This means an invalid signature will be treated as a valid signature from address(0), and its weight will be added to the total weight. If the wallet configuration includes address(0) as a signer (which could happen accidentally or through a misconfiguration), or if the attacker can craft signatures that recover to address(0) and accumulate enough weight, they could bypass signature validation.\",\n      \"attack_scenario\": \"1. Attacker identifies a wallet where the merkle tree configuration accidentally includes address(0) as a signer with some weight (e.g., due to uninitialized storage or configuration error). 2. Attacker crafts a signature with invalid parameters that causes ecrecover to return address(0). 3. The weight associated with address(0) is added to the total weight. 4. If this weight meets the threshold, the attacker can execute arbitrary transactions on the wallet without any valid private key.\",\n      \"suggested_fix\": \"Add a check after ecrecover to ensure the recovered address is not address(0): `address addr = ecrecover(_opHash, v, r, s); require(addr != address(0), 'Invalid signature');`\"\n    },\n    {\n      \"type\": \"Unchecked External Call Return Value\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"recoverBranch\",\n      \"location\": \"BaseSig.recoverBranch - FLAG_SIGNATURE_SAPIENT and FLAG_SIGNATURE_SAPIENT_COMPACT handlers\",\n      \"explanation\": \"The ISapient and ISapientCompact external calls return a bytes32 imageHash that is directly used in the merkle tree computation without validation. If the external contract returns bytes32(0) or any arbitrary value (either maliciously or due to a bug), this could lead to incorrect imageHash computation. Unlike ERC1271 which has a magic value check, Sapient signatures rely entirely on the external contract's return value being correct.\",\n      \"attack_scenario\": \"1. A malicious or buggy Sapient signer contract is added to the wallet configuration. 2. When recoverSapientSignature is called, it returns an arbitrary imageHash. 3. This incorrect imageHash is used in the merkle tree, potentially allowing the attacker to manipulate the final imageHash to match a known configuration. 4. The attacker could potentially authorize transactions they shouldn't be able to.\",\n      \"suggested_fix\": \"Consider adding validation that the returned sapientImageHash is not bytes32(0), or implement additional checks to verify the Sapient contract's response is legitimate. Document clearly that Sapient signers must be trusted contracts.\"\n    },\n    {\n      \"type\": \"Potential DoS via External Call\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"recoverBranch\",\n      \"location\": \"BaseSig.recoverBranch - FLAG_SIGNATURE_ERC1271, FLAG_SIGNATURE_SAPIENT, FLAG_SIGNATURE_SAPIENT_COMPACT handlers\",\n      \"explanation\": \"External calls to ERC1271, ISapient, and ISapientCompact contracts are made without gas limits. A malicious signer contract could consume all gas, causing the entire signature validation to fail. This could be used to grief legitimate transactions or prevent wallet operations.\",\n      \"attack_scenario\": \"1. Attacker gets added as an ERC1271 or Sapient signer to a multi-sig wallet (perhaps as a minority signer). 2. Attacker deploys a malicious contract that consumes all gas when isValidSignature or recoverSapientSignature is called. 3. Any transaction requiring signature validation will fail due to out-of-gas, effectively locking the wallet until the malicious signer is removed (which itself requires a valid signature).\",\n      \"suggested_fix\": \"Consider using a gas-limited call for external signature validation, or implement a mechanism to skip/timeout on external calls that consume excessive gas. Alternatively, document this risk clearly so wallet operators understand the trust assumptions when adding external signers.\"\n    }\n  ],\n  \"overall_explanation\": \"The BaseSig library implements complex signature validation logic for a smart contract wallet system. The most significant vulnerability is the lack of address(0) validation after ecrecover calls, which could allow invalid signatures to be accepted if address(0) is somehow part of the wallet configuration. Additionally, the external calls to Sapient contracts lack return value validation, and all external calls (ERC1271, Sapient) are made without gas limits, creating potential DoS vectors. The chained signature and checkpoint logic appears sound, with proper ordering checks and snapshot validation. The merkle tree construction for the imageHash follows a consistent pattern, though the reliance on external contracts for signature validation introduces trust assumptions that should be carefully documented.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": true,
+    "context_file_count": 1,
+    "has_protocol_doc": true
+  },
+  "api_metrics": {
+    "input_tokens": 8931,
+    "output_tokens": 1239,
+    "latency_ms": 25438.44985961914
+  }
+}

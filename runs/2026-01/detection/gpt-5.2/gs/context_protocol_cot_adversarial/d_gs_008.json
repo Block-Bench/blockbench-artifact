@@ -1,0 +1,78 @@
+{
+  "sample_id": "gs_008",
+  "dataset": "gs",
+  "prompt_type": "context_protocol_cot_adversarial",
+  "model": "gpt-5.2",
+  "timestamp": "2026-01-05T15:42:57.484122+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "logic_error",
+    "vulnerable_functions": [
+      "claimRewards"
+    ],
+    "severity": "medium",
+    "description": "`claimRewards()` uses `IVoter.poolVote(veTokenId)` incorrectly; `poolVote` is a mapping, not a function returning an array, causing a revert.",
+    "root_cause": "`claimRewards()` uses `IVoter.poolVote(veTokenId)` incorrectly; `poolVote` is a mapping, not a function returning an array, causing a revert.",
+    "attack_scenario": "A test votes on pools, warps time, and `claimRewards()` reverts due to invalid getter call.",
+    "fix_description": "Add `getPoolVote(veTokenId)` in `VoterV3.sol` to return the array. Status: Mitigation confirmed.",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.82,
+    "vulnerabilities": [
+      {
+        "type": "Incorrect share minting / deposit dilution due to using post-deposit totalAssets",
+        "severity": "high",
+        "vulnerable_function": "deposit",
+        "location": "GrowthHYBR.deposit(uint256,address)",
+        "explanation": "Shares are calculated AFTER the deposited HYBR has already been added to the veNFT. calculateShares(amount) uses totalAssets() at that moment, which includes the new deposit. This under-mints shares for new depositors and transfers value to existing gHYBR holders (systematic depositor dilution). Correct ERC4626-style math must use pre-deposit totalAssets (or compute shares before mutating totalAssets).",
+        "attack_scenario": "1) Attacker acquires some gHYBR shares early (or already holds them).\n2) Victim makes a large deposit.\n3) Because shares are computed using (amount * totalSupply) / (totalAssets AFTER deposit), victim receives fewer shares than fair.\n4) The attacker\u2019s existing shares now represent a larger fraction of total assets than before; attacker later withdraws and realizes value extracted from the victim (net of fees/constraints).",
+        "suggested_fix": "Compute shares based on totalAssets BEFORE depositing into veNFT:\n- cache uint256 assetsBefore = totalAssets(); uint256 supplyBefore = totalSupply();\n- compute shares using assetsBefore\n- then deposit/lock the HYBR\nAlternatively, adopt standard ERC4626 deposit/mint ordering (compute shares first, then move assets)."
+      },
+      {
+        "type": "Allowance handling bug causing compounding to revert (SafeERC20.safeApprove misuse with non-zero allowance)",
+        "severity": "high",
+        "vulnerable_function": "compound",
+        "location": "GrowthHYBR._initializeVeNFT(uint256) and GrowthHYBR.compound()",
+        "explanation": "_initializeVeNFT() sets HYBR allowance for votingEscrow to type(uint256).max via raw approve. On standard ERC20s, create_lock_for() will typically consume only initialAmount, leaving a very large non-zero remaining allowance. Later, compound() calls SafeERC20.safeApprove(votingEscrow, hybrBalance), which reverts if the current allowance is non-zero and the new allowance is non-zero. This can permanently break compounding after the first deposit (until another code path happens to set allowance back to 0).",
+        "attack_scenario": "1) First ever deposit happens, triggering _initializeVeNFT() which approves votingEscrow with max allowance.\n2) create_lock_for() pulls initialAmount, leaving a non-zero allowance.\n3) Protocol later accumulates HYBR rewards in this contract (via swaps, rebases sent as HYBR, etc.).\n4) Operator calls compound(); safeApprove reverts due to existing non-zero allowance.\n5) Compounding is DoSed; rewards sit idle and intended auto-compounding behavior fails.",
+        "suggested_fix": "Use a safe 'force approve' pattern:\n- SafeERC20.forceApprove(token, spender, amount) (OZ >=4.7/4.8 patterns) or\n- token.safeApprove(spender, 0); token.safeApprove(spender, amount);\nAlternatively, keep allowance permanently at max and never call safeApprove with non-zero (use safeIncreaseAllowance if needed). Apply the same pattern consistently across deposit/compound."
+      },
+      {
+        "type": "Withdraw can be permanently blocked if Team is unset or not an ERC721Receiver",
+        "severity": "medium",
+        "vulnerable_function": "withdraw",
+        "location": "GrowthHYBR.withdraw(uint256)",
+        "explanation": "withdraw() always attempts to safeTransferFrom the fee veNFT to Team. If Team is the zero address (default) or a contract that does not implement ERC721Receiver, the transfer will revert, blocking all withdrawals as long as withdrawFee > 0 (default 1% and cannot be set below MIN_WITHDRAW_FEE). This is a liveness/funds-access risk that can affect all users.",
+        "attack_scenario": "1) Users deposit and receive gHYBR.\n2) Owner/operator forgets to call setTeam() or sets Team to a non-receiver contract.\n3) Any user calling withdraw() triggers safeTransferFrom(..., Team, feeTokenId) which reverts.\n4) Withdrawals are globally blocked until admin action; users are stuck.",
+        "suggested_fix": "Require Team to be set to a valid address before enabling deposits/withdrawals (e.g., in constructor or by gating deposit/withdraw until Team != 0). Consider using transferFrom (non-safe) only if appropriate, or enforce Team is an EOA / ERC721Receiver via an interface check. Also handle the fee==0 case explicitly if you ever allow it."
+      },
+      {
+        "type": "Swapper approval DoS if swap reverts before approval reset (SafeERC20.safeApprove misuse)",
+        "severity": "medium",
+        "vulnerable_function": "executeSwap",
+        "location": "GrowthHYBR.executeSwap(ISwapper.SwapParams)",
+        "explanation": "executeSwap() uses safeApprove(tokenIn, swapper, amountIn) then calls swapper.swapToHYBR(), then resets approval to 0. If swapper.swapToHYBR() reverts, the reset to 0 never executes and the non-zero allowance remains. Future executeSwap() calls will revert at safeApprove because OZ safeApprove requires current allowance to be 0 when setting a new non-zero allowance. This can DoS future swaps for that token and strand reward tokens in the contract.",
+        "attack_scenario": "1) Operator calls executeSwap() with tokenIn.\n2) swapper.swapToHYBR() reverts (bad route, slippage, malicious swapper, paused DEX, etc.).\n3) Allowance remains non-zero.\n4) Any subsequent attempt to swap the same tokenIn reverts immediately at safeApprove, preventing cleanup without additional admin tooling.",
+        "suggested_fix": "Use forceApprove pattern (approve 0 then approve amount), or use safeIncreaseAllowance with careful accounting. Optionally reset allowance to 0 before setting it (best-effort) and/or add an admin function to clear allowances for arbitrary tokens."
+      }
+    ],
+    "overall_explanation": "Protocol intent (pooled veNFT with proportional shares and auto-compounding) is clear, but the current implementation has multiple correctness/liveness issues that materially violate intended behavior.\n\nMost importantly, deposits mint shares using post-deposit totalAssets(), which systematically under-mints shares to depositors (value transfer to existing holders). Separately, the allowance management around votingEscrow/swaps mixes raw approve and SafeERC20.safeApprove in a way that can deterministically revert and DoS compounding (and can also DoS future swaps after a revert). Finally, withdrawals depend on Team being correctly configured as a valid ERC721 recipient, otherwise withdrawals revert.\n\nGiven these issues, I cannot sign off as safe for mainnet in its current form."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.82,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Incorrect share minting / deposit dilution due to using post-deposit totalAssets\",\n      \"severity\": \"high\",\n      \"vulnerable_function\": \"deposit\",\n      \"location\": \"GrowthHYBR.deposit(uint256,address)\",\n      \"explanation\": \"Shares are calculated AFTER the deposited HYBR has already been added to the veNFT. calculateShares(amount) uses totalAssets() at that moment, which includes the new deposit. This under-mints shares for new depositors and transfers value to existing gHYBR holders (systematic depositor dilution). Correct ERC4626-style math must use pre-deposit totalAssets (or compute shares before mutating totalAssets).\",\n      \"attack_scenario\": \"1) Attacker acquires some gHYBR shares early (or already holds them).\\n2) Victim makes a large deposit.\\n3) Because shares are computed using (amount * totalSupply) / (totalAssets AFTER deposit), victim receives fewer shares than fair.\\n4) The attacker\u2019s existing shares now represent a larger fraction of total assets than before; attacker later withdraws and realizes value extracted from the victim (net of fees/constraints).\",\n      \"suggested_fix\": \"Compute shares based on totalAssets BEFORE depositing into veNFT:\\n- cache uint256 assetsBefore = totalAssets(); uint256 supplyBefore = totalSupply();\\n- compute shares using assetsBefore\\n- then deposit/lock the HYBR\\nAlternatively, adopt standard ERC4626 deposit/mint ordering (compute shares first, then move assets).\"\n    },\n    {\n      \"type\": \"Allowance handling bug causing compounding to revert (SafeERC20.safeApprove misuse with non-zero allowance)\",\n      \"severity\": \"high\",\n      \"vulnerable_function\": \"compound\",\n      \"location\": \"GrowthHYBR._initializeVeNFT(uint256) and GrowthHYBR.compound()\",\n      \"explanation\": \"_initializeVeNFT() sets HYBR allowance for votingEscrow to type(uint256).max via raw approve. On standard ERC20s, create_lock_for() will typically consume only initialAmount, leaving a very large non-zero remaining allowance. Later, compound() calls SafeERC20.safeApprove(votingEscrow, hybrBalance), which reverts if the current allowance is non-zero and the new allowance is non-zero. This can permanently break compounding after the first deposit (until another code path happens to set allowance back to 0).\",\n      \"attack_scenario\": \"1) First ever deposit happens, triggering _initializeVeNFT() which approves votingEscrow with max allowance.\\n2) create_lock_for() pulls initialAmount, leaving a non-zero allowance.\\n3) Protocol later accumulates HYBR rewards in this contract (via swaps, rebases sent as HYBR, etc.).\\n4) Operator calls compound(); safeApprove reverts due to existing non-zero allowance.\\n5) Compounding is DoSed; rewards sit idle and intended auto-compounding behavior fails.\",\n      \"suggested_fix\": \"Use a safe 'force approve' pattern:\\n- SafeERC20.forceApprove(token, spender, amount) (OZ >=4.7/4.8 patterns) or\\n- token.safeApprove(spender, 0); token.safeApprove(spender, amount);\\nAlternatively, keep allowance permanently at max and never call safeApprove with non-zero (use safeIncreaseAllowance if needed). Apply the same pattern consistently across deposit/compound.\"\n    },\n    {\n      \"type\": \"Withdraw can be permanently blocked if Team is unset or not an ERC721Receiver\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"withdraw\",\n      \"location\": \"GrowthHYBR.withdraw(uint256)\",\n      \"explanation\": \"withdraw() always attempts to safeTransferFrom the fee veNFT to Team. If Team is the zero address (default) or a contract that does not implement ERC721Receiver, the transfer will revert, blocking all withdrawals as long as withdrawFee > 0 (default 1% and cannot be set below MIN_WITHDRAW_FEE). This is a liveness/funds-access risk that can affect all users.\",\n      \"attack_scenario\": \"1) Users deposit and receive gHYBR.\\n2) Owner/operator forgets to call setTeam() or sets Team to a non-receiver contract.\\n3) Any user calling withdraw() triggers safeTransferFrom(..., Team, feeTokenId) which reverts.\\n4) Withdrawals are globally blocked until admin action; users are stuck.\",\n      \"suggested_fix\": \"Require Team to be set to a valid address before enabling deposits/withdrawals (e.g., in constructor or by gating deposit/withdraw until Team != 0). Consider using transferFrom (non-safe) only if appropriate, or enforce Team is an EOA / ERC721Receiver via an interface check. Also handle the fee==0 case explicitly if you ever allow it.\"\n    },\n    {\n      \"type\": \"Swapper approval DoS if swap reverts before approval reset (SafeERC20.safeApprove misuse)\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"executeSwap\",\n      \"location\": \"GrowthHYBR.executeSwap(ISwapper.SwapParams)\",\n      \"explanation\": \"executeSwap() uses safeApprove(tokenIn, swapper, amountIn) then calls swapper.swapToHYBR(), then resets approval to 0. If swapper.swapToHYBR() reverts, the reset to 0 never executes and the non-zero allowance remains. Future executeSwap() calls will revert at safeApprove because OZ safeApprove requires current allowance to be 0 when setting a new non-zero allowance. This can DoS future swaps for that token and strand reward tokens in the contract.\",\n      \"attack_scenario\": \"1) Operator calls executeSwap() with tokenIn.\\n2) swapper.swapToHYBR() reverts (bad route, slippage, malicious swapper, paused DEX, etc.).\\n3) Allowance remains non-zero.\\n4) Any subsequent attempt to swap the same tokenIn reverts immediately at safeApprove, preventing cleanup without additional admin tooling.\",\n      \"suggested_fix\": \"Use forceApprove pattern (approve 0 then approve amount), or use safeIncreaseAllowance with careful accounting. Optionally reset allowance to 0 before setting it (best-effort) and/or add an admin function to clear allowances for arbitrary tokens.\"\n    }\n  ],\n  \"overall_explanation\": \"Protocol intent (pooled veNFT with proportional shares and auto-compounding) is clear, but the current implementation has multiple correctness/liveness issues that materially violate intended behavior.\\n\\nMost importantly, deposits mint shares using post-deposit totalAssets(), which systematically under-mints shares to depositors (value transfer to existing holders). Separately, the allowance management around votingEscrow/swaps mixes raw approve and SafeERC20.safeApprove in a way that can deterministically revert and DoS compounding (and can also DoS future swaps after a revert). Finally, withdrawals depend on Team being correctly configured as a valid ERC721 recipient, otherwise withdrawals revert.\\n\\nGiven these issues, I cannot sign off as safe for mainnet in its current form.\"\n}"
+  },
+  "context_info": {
+    "has_context_files": true,
+    "context_file_count": 1,
+    "has_protocol_doc": true
+  },
+  "api_metrics": {
+    "input_tokens": 8366,
+    "output_tokens": 4339,
+    "latency_ms": 123301.93901062012
+  }
+}

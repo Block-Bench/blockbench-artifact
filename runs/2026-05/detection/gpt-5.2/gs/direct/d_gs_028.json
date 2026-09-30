@@ -1,0 +1,51 @@
+{
+  "sample_id": "gs_028",
+  "dataset": "gs",
+  "prompt_type": "direct",
+  "model": "gpt-5.2",
+  "timestamp": "2026-05-25T06:45:26.058811+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "access_control",
+    "vulnerable_functions": [
+      "recover"
+    ],
+    "severity": "high",
+    "description": "When a wallet is behind a checkpointer and a chained signature is used with bit 6 (checkpointer usage flag) set to zero, BaseSig.recover skips the checkpointer validation block (BaseSig.sol:88-106). This leaves _checkpointer and snapshot unset (zero-valued). In recoverChained, the checkpointer is ignored, and the signature validation passes even if the checkpointer should be enforced. The final validation succeeds because snapshot.imageHash == bytes32(0) as the checkpointer is ignored.",
+    "root_cause": "When a wallet is behind a checkpointer and a chained signature is used with bit 6 (checkpointer usage flag) set to zero, BaseSig.recover skips the checkpointer validation block (BaseSig.sol:88-106). This leaves _checkpointer and snapshot unset (zero-valued). In recoverChained, the checkpointer is ignored, and the signature validation passes even if the checkpointer should be enforced. The final validation succeeds because snapshot.imageHash == bytes32(0) as the checkpointer is ignored.",
+    "attack_scenario": "An evicted signer can sign a payload valid under stale wallet configuration and bypass checkpointer validation. PoC: Add test case to BaseSigTest and run forge test --match-test test_PoC_checkpointer_bypass. The test constructs a chained signature with checkpointer disabled, mocks the checkpointer response, and asserts successful recovery with correct image hash.",
+    "fix_description": "Do not permit checkpointer to be disabled (bit 6 unset) if chained signature is used. Revert in this case with custom error. Example fix in BaseSig.sol:\nif (signatureFlag & 0x40 == 0) {\n    revert MissingCheckpointer();\n}",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.93,
+    "vulnerabilities": [
+      {
+        "type": "access_control",
+        "severity": "high",
+        "vulnerable_function": "recover(), recoverChained()",
+        "location": "BaseSig library: recover() and recoverChained()",
+        "explanation": "Root cause: checkpointer enforcement is conditional on signatureFlag bit 6 (0x40). In recover(), the checkpointer snapshot validation (ICheckpointer(_checkpointer).snapshotFor(...)) is only executed when (signatureFlag & 0x40 == 0x40). If a chained signature is used (signatureFlag & 0x01 == 0x01) but bit 6 is unset, snapshot remains the default zero-value and _checkpointer may remain unset/ignored. recoverChained() then effectively treats the wallet as not being behind a checkpointer because _snapshot.imageHash == 0, so the final \"UnusedSnapshot\" validation is bypassed. This allows signatures that should be rejected due to checkpointer policy (e.g., signer eviction / stale image checkpointing) to validate successfully.",
+        "attack_scenario": "1) Victim wallet is configured to use a checkpointer middleware that enforces signer eviction / freshness via snapshot (imageHash, checkpoint).\n2) Attacker is a previously-authorized signer that has been removed/evicted in the checkpointer\u2019s current snapshot (i.e., signatures under the old configuration should no longer be accepted unless checkpoint rules are satisfied).\n3) Attacker crafts a chained signature payload where the outer signature flag indicates a chained signature (bit 0 set), but explicitly disables checkpointer usage by leaving bit 6 (0x40) unset.\n4) Attacker signs the operation under the stale wallet configuration (old signer set / old checkpoint) and submits the operation to the wallet/entrypoint that relies on BaseSig.recover() for validation.\n5) Because bit 6 is unset, recover() never loads snapshot data, and recoverChained() never enforces the snapshot/checkpoint constraints; the stale signature passes, enabling unauthorized execution (e.g., transfer of wallet funds).",
+        "suggested_fix": "Enforce that chained signatures cannot opt out of checkpointer validation when a checkpointer is expected/available. Concretely:\n- In recover(), if (signatureFlag & 0x01 == 0x01) (chained) AND the wallet/checkpointer context requires a checkpointer, revert if (signatureFlag & 0x40 == 0).\n- Alternatively, always require snapshot/checkpointer validation for chained signatures when _checkpointer != address(0) (or when the wallet is known to be checkpointer-protected), regardless of bit 6.\n- Add a custom error (e.g., MissingCheckpointer()) and revert on chained + disabled checkpointer flag."
+      }
+    ],
+    "overall_explanation": "BaseSig\u2019s chained-signature path allows disabling checkpointer usage via a flag bit. When bit 6 is unset, snapshot data is never loaded, and recoverChained() effectively bypasses all checkpointer-based freshness/eviction validation, allowing previously-evicted or stale signers to authorize operations. The UnstakeRequestsManager context contract did not reveal an untrusted, exploitable vulnerability under the provided code and access constraints."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.93,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"access_control\",\n      \"severity\": \"high\",\n      \"vulnerable_function\": \"recover(), recoverChained()\",\n      \"location\": \"BaseSig library: recover() and recoverChained()\",\n      \"explanation\": \"Root cause: checkpointer enforcement is conditional on signatureFlag bit 6 (0x40). In recover(), the checkpointer snapshot validation (ICheckpointer(_checkpointer).snapshotFor(...)) is only executed when (signatureFlag & 0x40 == 0x40). If a chained signature is used (signatureFlag & 0x01 == 0x01) but bit 6 is unset, snapshot remains the default zero-value and _checkpointer may remain unset/ignored. recoverChained() then effectively treats the wallet as not being behind a checkpointer because _snapshot.imageHash == 0, so the final \\\"UnusedSnapshot\\\" validation is bypassed. This allows signatures that should be rejected due to checkpointer policy (e.g., signer eviction / stale image checkpointing) to validate successfully.\",\n      \"attack_scenario\": \"1) Victim wallet is configured to use a checkpointer middleware that enforces signer eviction / freshness via snapshot (imageHash, checkpoint).\\n2) Attacker is a previously-authorized signer that has been removed/evicted in the checkpointer\u2019s current snapshot (i.e., signatures under the old configuration should no longer be accepted unless checkpoint rules are satisfied).\\n3) Attacker crafts a chained signature payload where the outer signature flag indicates a chained signature (bit 0 set), but explicitly disables checkpointer usage by leaving bit 6 (0x40) unset.\\n4) Attacker signs the operation under the stale wallet configuration (old signer set / old checkpoint) and submits the operation to the wallet/entrypoint that relies on BaseSig.recover() for validation.\\n5) Because bit 6 is unset, recover() never loads snapshot data, and recoverChained() never enforces the snapshot/checkpoint constraints; the stale signature passes, enabling unauthorized execution (e.g., transfer of wallet funds).\",\n      \"suggested_fix\": \"Enforce that chained signatures cannot opt out of checkpointer validation when a checkpointer is expected/available. Concretely:\\n- In recover(), if (signatureFlag & 0x01 == 0x01) (chained) AND the wallet/checkpointer context requires a checkpointer, revert if (signatureFlag & 0x40 == 0).\\n- Alternatively, always require snapshot/checkpointer validation for chained signatures when _checkpointer != address(0) (or when the wallet is known to be checkpointer-protected), regardless of bit 6.\\n- Add a custom error (e.g., MissingCheckpointer()) and revert on chained + disabled checkpointer flag.\"\n    }\n  ],\n  \"overall_explanation\": \"BaseSig\u2019s chained-signature path allows disabling checkpointer usage via a flag bit. When bit 6 is unset, snapshot data is never loaded, and recoverChained() effectively bypasses all checkpointer-based freshness/eviction validation, allowing previously-evicted or stale signers to authorize operations. The UnstakeRequestsManager context contract did not reveal an untrusted, exploitable vulnerability under the provided code and access constraints.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": true,
+    "context_file_count": 1,
+    "has_protocol_doc": false
+  },
+  "api_metrics": {
+    "input_tokens": 7705,
+    "output_tokens": 1426,
+    "latency_ms": 21067.223072052002
+  }
+}

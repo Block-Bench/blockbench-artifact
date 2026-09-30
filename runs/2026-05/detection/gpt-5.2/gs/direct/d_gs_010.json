@@ -1,0 +1,51 @@
+{
+  "sample_id": "gs_010",
+  "dataset": "gs",
+  "prompt_type": "direct",
+  "model": "gpt-5.2",
+  "timestamp": "2026-05-25T06:35:58.334135+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "flash_loan",
+    "vulnerable_functions": [
+      "isGranted"
+    ],
+    "severity": "high",
+    "description": "The MinVotingPowerCondition contract allows any users who hold at least plugin.minProposerVotingPower() amount of tokens (locked in the LockManager or in their token balance) to create a proposal and execute LockToVote.createProposal. This logic can be easily bypassed if the token allows flashloan or flashmint. Given that isGranted checks the user's token balance (line 45: token.balanceOf(_who) + lockManager.getLockedBalance(_who)), the user does not even need to lock the flashloaned amount into the LockManager to be able to create and spam proposals.",
+    "root_cause": "The MinVotingPowerCondition contract allows any users who hold at least plugin.minProposerVotingPower() amount of tokens (locked in the LockManager or in their token balance) to create a proposal and execute LockToVote.createProposal. This logic can be easily bypassed if the token allows flashloan or flashmint. Given that isGranted checks the user's token balance (line 45: token.balanceOf(_who) + lockManager.getLockedBalance(_who)), the user does not even need to lock the flashloaned amount into the LockManager to be able to create and spam proposals.",
+    "attack_scenario": "1. Flashloan the token.\n2. Create the proposal (isGranted passes because token.balanceOf includes flashloaned amount).\n3. Lock + vote the proposal and auto-execute it (EarlyExecution).\n4. Unlock the tokens.\n5. Repay the flashloan.\nAll in the very same transaction.",
+    "fix_description": "Avoid using the token's balance and require the user to only use the locked amount. Change line 45 from 'token.balanceOf(_who) + lockManager.getLockedBalance(_who)' to just 'lockManager.getLockedBalance(_who)'. Store the proposal's creator in the proposal struct and require that the locked amount required to create the proposal won't be unlockable until the proposal ends.",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.9,
+    "vulnerabilities": [
+      {
+        "type": "flash_loan / flash_mint governance bypass (balance-based permission check)",
+        "severity": "high",
+        "vulnerable_function": "isGranted",
+        "location": "MinVotingPowerCondition.isGranted",
+        "explanation": "The permission check for proposal creation is based on the caller\u2019s instantaneous ERC20 balance plus their locked balance: `token.balanceOf(_who) + lockManager.getLockedBalance(_who)`. If the governance token supports flashloan/flashmint (or is borrowable via an external lending pool), an attacker can temporarily inflate `token.balanceOf(_who)` during a single transaction and satisfy `minProposerVotingPower()` without having any sustained stake. Because this is a view check used for access control, it can be bypassed at the exact moment proposal creation is executed, enabling untrusted accounts to create/spam proposals and potentially combine it with systems that allow fast voting/execution based on transient balances.",
+        "attack_scenario": "1) Attacker takes a flashloan/flash-mint of the governance token (or borrows it via any mechanism that yields a temporary balance).\n2) In the same transaction, attacker calls the plugin function gated by this condition (e.g., createProposal). `isGranted` passes because `token.balanceOf(attacker)` includes the flash-borrowed amount.\n3) If the broader system allows early execution / same-tx execution paths (e.g., low quorum, early execution, or attacker can also transiently meet voting thresholds), attacker proceeds to vote/execute actions.\n4) Attacker repays the flashloan at the end of the transaction, returning their balance to near-zero, but the proposal(s) already exist and may be executed depending on the rest of the governance flow.\n5) Repeat to spam proposals or to execute governance actions if other thresholds can also be met transiently.",
+        "suggested_fix": "Do not use the raw ERC20 `balanceOf` for permissioning proposal creation.\n- Minimal change (as suggested):\n  - Replace `token.balanceOf(_who) + lockManager.getLockedBalance(_who)` with `lockManager.getLockedBalance(_who)`.\n- Stronger fix (recommended):\n  - Require a time-locked stake: record proposal creator and the amount locked at creation; prevent unlocking below the required threshold until proposal creation grace period / voting period ends.\n  - Alternatively, use a snapshot-based voting power mechanism (e.g., ERC20Votes snapshot at proposal block) and check proposer power at a past block, not the current transaction balance."
+      }
+    ],
+    "overall_explanation": "The contract\u2019s only security-relevant logic is `isGranted`, which gates permissions based on an account\u2019s current token balance plus locked balance. This is exploitable when the token can be temporarily acquired (flashloan/flashmint/borrow), allowing an attacker without real stake to pass the check and create proposals (and potentially execute governance actions depending on the wider system). The fix is to remove reliance on instantaneous `balanceOf` and instead require locked/snapshotted voting power that cannot be transiently inflated."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.9,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"flash_loan / flash_mint governance bypass (balance-based permission check)\",\n      \"severity\": \"high\",\n      \"vulnerable_function\": \"isGranted\",\n      \"location\": \"MinVotingPowerCondition.isGranted\",\n      \"explanation\": \"The permission check for proposal creation is based on the caller\u2019s instantaneous ERC20 balance plus their locked balance: `token.balanceOf(_who) + lockManager.getLockedBalance(_who)`. If the governance token supports flashloan/flashmint (or is borrowable via an external lending pool), an attacker can temporarily inflate `token.balanceOf(_who)` during a single transaction and satisfy `minProposerVotingPower()` without having any sustained stake. Because this is a view check used for access control, it can be bypassed at the exact moment proposal creation is executed, enabling untrusted accounts to create/spam proposals and potentially combine it with systems that allow fast voting/execution based on transient balances.\",\n      \"attack_scenario\": \"1) Attacker takes a flashloan/flash-mint of the governance token (or borrows it via any mechanism that yields a temporary balance).\\n2) In the same transaction, attacker calls the plugin function gated by this condition (e.g., createProposal). `isGranted` passes because `token.balanceOf(attacker)` includes the flash-borrowed amount.\\n3) If the broader system allows early execution / same-tx execution paths (e.g., low quorum, early execution, or attacker can also transiently meet voting thresholds), attacker proceeds to vote/execute actions.\\n4) Attacker repays the flashloan at the end of the transaction, returning their balance to near-zero, but the proposal(s) already exist and may be executed depending on the rest of the governance flow.\\n5) Repeat to spam proposals or to execute governance actions if other thresholds can also be met transiently.\",\n      \"suggested_fix\": \"Do not use the raw ERC20 `balanceOf` for permissioning proposal creation.\\n- Minimal change (as suggested):\\n  - Replace `token.balanceOf(_who) + lockManager.getLockedBalance(_who)` with `lockManager.getLockedBalance(_who)`.\\n- Stronger fix (recommended):\\n  - Require a time-locked stake: record proposal creator and the amount locked at creation; prevent unlocking below the required threshold until proposal creation grace period / voting period ends.\\n  - Alternatively, use a snapshot-based voting power mechanism (e.g., ERC20Votes snapshot at proposal block) and check proposer power at a past block, not the current transaction balance.\"\n    }\n  ],\n  \"overall_explanation\": \"The contract\u2019s only security-relevant logic is `isGranted`, which gates permissions based on an account\u2019s current token balance plus locked balance. This is exploitable when the token can be temporarily acquired (flashloan/flashmint/borrow), allowing an attacker without real stake to pass the check and create proposals (and potentially execute governance actions depending on the wider system). The fix is to remove reliance on instantaneous `balanceOf` and instead require locked/snapshotted voting power that cannot be transiently inflated.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": false,
+    "context_file_count": 0,
+    "has_protocol_doc": false
+  },
+  "api_metrics": {
+    "input_tokens": 1717,
+    "output_tokens": 753,
+    "latency_ms": 12239.083051681519
+  }
+}

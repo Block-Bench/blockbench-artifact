@@ -1,0 +1,60 @@
+{
+  "sample_id": "gs_002",
+  "dataset": "gs",
+  "prompt_type": "context_protocol_cot",
+  "model": "qwen3-coder-plus",
+  "timestamp": "2026-01-05T13:43:19.340985+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "logic_error",
+    "vulnerable_functions": [
+      "getSwapFee"
+    ],
+    "severity": "medium",
+    "description": "Governance can configure `DynamicSwapFeeModule` with fees up to 50%, but `CLFactory.getSwapFee` discards any value above 100_000 ppm (10%) and falls back to the tick-spacing default (often 500 ppm = 0.05%) without reverting or logging. Operators see the module reporting 20%, yet users continue paying the tiny default fee. The silent fallback misleads governance into believing higher fees are active. Impact - Governance believes a protective high fee is set (e.g., during launch anti-MEV), but the effective fee drops back to the default (e.g., 0.05%). - Traders are charged far less than intended, defeating protective or revenue objectives. - The misconfiguration has no on-chain signal, so the mistake can persist unnoticed. Root Cause - getSwapFee checks fee <= 100_000 ; larger values are ignored and the function returns tickSpacingToFee . - The module itself allows feeCap up to 500_000 (50%), so governance can set a value the factory immediately discards in favor of the default.",
+    "root_cause": "Governance can configure `DynamicSwapFeeModule` with fees up to 50%, but `CLFactory.getSwapFee` discards any value above 100_000 ppm (10%) and falls back to the tick-spacing default (often 500 ppm = 0.05%) without reverting or logging. Operators see the module reporting 20%, yet users continue paying the tiny default fee. The silent fallback misleads governance into believing higher fees are active. Impact - Governance believes a protective high fee is set (e.g., during launch anti-MEV), but the effective fee drops back to the default (e.g., 0.05%). - Traders are charged far less than intended, defeating protective or revenue objectives. - The misconfiguration has no on-chain signal, so the mistake can persist unnoticed. Root Cause - getSwapFee checks fee <= 100_000 ; larger values are ignored and the function returns tickSpacingToFee . - The module itself allows feeCap up to 500_000 (50%), so governance can set a value the factory immediately discards in favor of the default.",
+    "attack_scenario": "cd cl forge test --match-path test/PoC_DynamicFee_ClampToDefault.t.sol -vvv The PoC lifts the module cap, sets a 20% custom fee, and shows that `DynamicSwapFeeModule.getFee` returns 200_000 while `CLFactory.getSwapFee` still returns the base 500 ppm. PoC source ( `cl/test/PoC_DynamicFee_ClampToDefault.t.sol` ): // SPDX-License-Identifier: MIT pragma solidity 0.7.6; pragma abicoder v2; import \"forge-std/Test.sol\"; import {C4PoCTestbed} from \"./C4PoCTestbed.t.sol\"; import {DynamicSwapFeeModule} from \"contracts/core/fees/DynamicSwapFeeModule.sol\"; contract PoC_DynamicFee_ClampToDefault is C4PoCTestbed { address internal pool; function setUp() public override { super.setUp(); pool = poolFactory.createPool(USDC, DAI, 100, uint160(2 ** 96)); require(pool != address(0), \"pool not created\"); } function testFactoryClampsFeeAboveTenPercent() public { address manager = poolFactory.swapFeeManager(); vm.prank(manager); swapFeeModule.setFeeCap(pool, 500_000); // raise module cap to 50% vm.prank(manager); swapFeeModule.setScalingFactor(pool, 1); // ensure positive TWAP delta doesn't zero fee uint24 highFee = 200_000; // 20% vm.prank(manager); swapFeeModule.setCustomFee(pool, highFee); uint24 moduleFee = swapFeeModule.getFee(pool); assertEq(uint256(moduleFee), uint256(highFee), \"module reports configured fee\"); uint24 factoryFee = poolFactory.getSwapFee(pool); assertEq(uint256(factoryFee), 500, \"factory silently clamps to tick-spacing default\"); } }",
+    "fix_description": "Either revert when the module returns > 100_000 or raise the factory ceiling to match the module\u2019s cap. Emit events or add admin tooling to surface out-of-range configurations so operators can correct them. Hybra Finance mitigated: Added setMaxFee() function to make the fee cap configurable by the owner (up to 50%). This replaces the hardcoded limit and allows governance to adjust the maximum dynamic fee when needed.",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.9,
+    "vulnerabilities": [
+      {
+        "type": "Logic Error - Fee Calculation Bypass",
+        "severity": "high",
+        "vulnerable_function": "getUnstakedFee",
+        "location": "CLFactory.getUnstakedFee",
+        "explanation": "The getUnstakedFee function returns 0 when gaugeManager.isGaugeAliveForPool(pool) returns true, completely bypassing any fee calculation. This means active pools pay no unstaked fees regardless of the configured fee module or default fee.",
+        "attack_scenario": "1. Liquidity providers stake in active gauges 2. The getUnstakedFee function returns 0 for these active pools 3. No unstaked fees are charged even when gaugeManager reports the gauge is alive 4. This bypasses the intended fee mechanism for active pools",
+        "suggested_fix": "Reconsider the logic to check if gauge is NOT alive before returning 0, or implement proper unstaked fee calculation for active pools when appropriate."
+      },
+      {
+        "type": "Logic Error - Protocol Fee Inconsistency",
+        "severity": "medium",
+        "vulnerable_function": "getProtocolFee",
+        "location": "CLFactory.getProtocolFee",
+        "explanation": "The getProtocolFee function returns 0 when gaugeManager.isGaugeAliveForPool(pool) returns true, meaning active pools pay no protocol fees. This contradicts the protocol documentation which suggests protocol fees should exist for active pools.",
+        "attack_scenario": "1. Pools with active gauges have their protocol fee set to 0 2. No protocol fees are collected from active, high-volume pools 3. Protocol revenue is significantly reduced during active gauge periods",
+        "suggested_fix": "Align the protocol fee logic with the intended business model - either remove the gauge alive check or clarify that protocol fees are only for inactive gauges."
+      }
+    ],
+    "overall_explanation": "The factory contract has critical logic errors in fee calculation functions that bypass intended fee mechanisms. The getUnstakedFee and getProtocolFee functions return 0 when gauges are active, completely bypassing fee collection for active pools. This undermines the protocol's revenue model and fee structure as described in documentation."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.9,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Logic Error - Fee Calculation Bypass\",\n      \"severity\": \"high\",\n      \"vulnerable_function\": \"getUnstakedFee\",\n      \"location\": \"CLFactory.getUnstakedFee\",\n      \"explanation\": \"The getUnstakedFee function returns 0 when gaugeManager.isGaugeAliveForPool(pool) returns true, completely bypassing any fee calculation. This means active pools pay no unstaked fees regardless of the configured fee module or default fee.\",\n      \"attack_scenario\": \"1. Liquidity providers stake in active gauges 2. The getUnstakedFee function returns 0 for these active pools 3. No unstaked fees are charged even when gaugeManager reports the gauge is alive 4. This bypasses the intended fee mechanism for active pools\",\n      \"suggested_fix\": \"Reconsider the logic to check if gauge is NOT alive before returning 0, or implement proper unstaked fee calculation for active pools when appropriate.\"\n    },\n    {\n      \"type\": \"Logic Error - Protocol Fee Inconsistency\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"getProtocolFee\",\n      \"location\": \"CLFactory.getProtocolFee\",\n      \"explanation\": \"The getProtocolFee function returns 0 when gaugeManager.isGaugeAliveForPool(pool) returns true, meaning active pools pay no protocol fees. This contradicts the protocol documentation which suggests protocol fees should exist for active pools.\",\n      \"attack_scenario\": \"1. Pools with active gauges have their protocol fee set to 0 2. No protocol fees are collected from active, high-volume pools 3. Protocol revenue is significantly reduced during active gauge periods\",\n      \"suggested_fix\": \"Align the protocol fee logic with the intended business model - either remove the gauge alive check or clarify that protocol fees are only for inactive gauges.\"\n    }\n  ],\n  \"overall_explanation\": \"The factory contract has critical logic errors in fee calculation functions that bypass intended fee mechanisms. The getUnstakedFee and getProtocolFee functions return 0 when gauges are active, completely bypassing fee collection for active pools. This undermines the protocol's revenue model and fee structure as described in documentation.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": false,
+    "context_file_count": 0,
+    "has_protocol_doc": true
+  },
+  "api_metrics": {
+    "input_tokens": 3376,
+    "output_tokens": 492,
+    "latency_ms": 10770.473003387451
+  }
+}

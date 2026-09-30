@@ -1,0 +1,69 @@
+{
+  "sample_id": "nc_tc_016",
+  "variant": "nocomments",
+  "model": "gpt-5.2",
+  "prompt_type": "direct",
+  "timestamp": "2026-01-05T02:37:11.537198+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "validation_bypass",
+    "vulnerable_function": "deposit",
+    "vulnerable_lines": [
+      57
+    ],
+    "severity": null
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.93,
+    "vulnerabilities": [
+      {
+        "type": "Missing access control on resource mapping (resourceID hijack)",
+        "severity": "critical",
+        "vulnerable_lines": [
+          62,
+          63
+        ],
+        "location": "BridgeHandler.setResource",
+        "explanation": "BridgeHandler.setResource is externally callable by anyone, allowing arbitrary updates of resourceIDToTokenContractAddress. This lets an attacker remap an existing resourceID (used by the bridge/relayers) to a malicious token contract (or an unintended real token). Deposits will then call transferFrom on the attacker-chosen token address, breaking asset locking logic and potentially enabling unbacked bridge events (depending on how off-chain relayers mint/unlock based on Deposit events).",
+        "attack_scenario": "1) Attacker calls setResource(resourceID, maliciousToken).\n2) Attacker calls QuantumBridge.deposit(destinationDomainID, resourceID, abi.encode(veryLargeAmount)).\n3) BridgeHandler.deposit uses maliciousToken as tokenContract and calls maliciousToken.transferFrom(...).\n4) maliciousToken.transferFrom returns true without transferring tokens (or transfers 0), so no assets are locked.\n5) QuantumBridge emits Deposit; off-chain relayers observing this event may mint/release assets on the destination chain, resulting in unbacked mint/unlock.",
+        "suggested_fix": "Add strict access control to setResource (e.g., onlyOwner/onlyAdmin) and/or restrict to a governance/handler role. Also enforce token allowlisting (actually use contractWhitelist) and validate tokenAddress is a contract. Consider making mappings immutable after initialization if possible."
+      },
+      {
+        "type": "Unauthorized token pull via arbitrary depositer parameter (anyone can spend others' allowances)",
+        "severity": "high",
+        "vulnerable_lines": [
+          47,
+          49,
+          57
+        ],
+        "location": "BridgeHandler.deposit",
+        "explanation": "BridgeHandler.deposit is publicly callable and accepts an arbitrary depositer address. Any attacker can call deposit with depositer=victim and an amount, causing IERC20(tokenContract).transferFrom(victim, address(this), amount) to execute as long as the victim previously approved BridgeHandler. This enables unauthorized draining of victims' approved tokens into the handler contract (effectively stealing/locking funds without the victim initiating a deposit).",
+        "attack_scenario": "1) Victim approves BridgeHandler for token T (common: infinite allowance).\n2) Attacker calls BridgeHandler.deposit(resourceIDForT, victim, abi.encode(amount)).\n3) transferFrom pulls victim\u2019s tokens into BridgeHandler without victim calling QuantumBridge.deposit.\n4) Victim loses control of the tokens (they are now stuck/locked in BridgeHandler unless another mechanism releases them).",
+        "suggested_fix": "Restrict BridgeHandler.deposit to only be callable by the trusted QuantumBridge contract (e.g., store bridge address and add onlyBridge modifier). Remove the depositer parameter and use msg.sender as depositor (or require(depositer == msg.sender))."
+      },
+      {
+        "type": "Unchecked ERC20 transferFrom return value enabling false-positive deposits",
+        "severity": "medium",
+        "vulnerable_lines": [
+          57
+        ],
+        "location": "BridgeHandler.deposit",
+        "explanation": "The return value of IERC20(tokenContract).transferFrom(...) is ignored. A malicious (or non-compliant) token can return false (or otherwise not transfer the expected amount) without reverting, while the bridge flow continues and QuantumBridge emits a Deposit event. If off-chain systems treat the event as proof of locked funds, this can lead to mint/unlock without actually securing funds in the handler.",
+        "attack_scenario": "1) Attacker ensures resourceID points to a token that returns false or transfers less than requested (e.g., malicious token; can be arranged via the unprotected setResource).\n2) Attacker calls QuantumBridge.deposit with large amount.\n3) transferFrom returns false / transfers 0, but BridgeHandler does not revert.\n4) Deposit event is emitted and may be honored off-chain as a valid lock, enabling unbacked mint/unlock.",
+        "suggested_fix": "Use OpenZeppelin SafeERC20 (safeTransferFrom) or explicitly check the returned boolean: require(IERC20(tokenContract).transferFrom(...), \"TRANSFER_FROM_FAILED\"). Also consider balance-delta checks for fee-on-transfer tokens if exact amounts are required."
+      }
+    ],
+    "overall_explanation": "The core issues are missing access control and missing caller validation in BridgeHandler. Any user can (1) remap resourceIDs to arbitrary token contracts and (2) call deposit directly with an arbitrary depositer address, allowing unauthorized pulling of tokens from victims who approved the handler. Additionally, ignoring transferFrom\u2019s return value can allow deposits to appear successful without locking funds, which is particularly dangerous for bridge systems relying on emitted events."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.93,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Missing access control on resource mapping (resourceID hijack)\",\n      \"severity\": \"critical\",\n      \"vulnerable_lines\": [62, 63],\n      \"location\": \"BridgeHandler.setResource\",\n      \"explanation\": \"BridgeHandler.setResource is externally callable by anyone, allowing arbitrary updates of resourceIDToTokenContractAddress. This lets an attacker remap an existing resourceID (used by the bridge/relayers) to a malicious token contract (or an unintended real token). Deposits will then call transferFrom on the attacker-chosen token address, breaking asset locking logic and potentially enabling unbacked bridge events (depending on how off-chain relayers mint/unlock based on Deposit events).\",\n      \"attack_scenario\": \"1) Attacker calls setResource(resourceID, maliciousToken).\\n2) Attacker calls QuantumBridge.deposit(destinationDomainID, resourceID, abi.encode(veryLargeAmount)).\\n3) BridgeHandler.deposit uses maliciousToken as tokenContract and calls maliciousToken.transferFrom(...).\\n4) maliciousToken.transferFrom returns true without transferring tokens (or transfers 0), so no assets are locked.\\n5) QuantumBridge emits Deposit; off-chain relayers observing this event may mint/release assets on the destination chain, resulting in unbacked mint/unlock.\",\n      \"suggested_fix\": \"Add strict access control to setResource (e.g., onlyOwner/onlyAdmin) and/or restrict to a governance/handler role. Also enforce token allowlisting (actually use contractWhitelist) and validate tokenAddress is a contract. Consider making mappings immutable after initialization if possible.\"\n    },\n    {\n      \"type\": \"Unauthorized token pull via arbitrary depositer parameter (anyone can spend others' allowances)\",\n      \"severity\": \"high\",\n      \"vulnerable_lines\": [47, 49, 57],\n      \"location\": \"BridgeHandler.deposit\",\n      \"explanation\": \"BridgeHandler.deposit is publicly callable and accepts an arbitrary depositer address. Any attacker can call deposit with depositer=victim and an amount, causing IERC20(tokenContract).transferFrom(victim, address(this), amount) to execute as long as the victim previously approved BridgeHandler. This enables unauthorized draining of victims' approved tokens into the handler contract (effectively stealing/locking funds without the victim initiating a deposit).\",\n      \"attack_scenario\": \"1) Victim approves BridgeHandler for token T (common: infinite allowance).\\n2) Attacker calls BridgeHandler.deposit(resourceIDForT, victim, abi.encode(amount)).\\n3) transferFrom pulls victim\u2019s tokens into BridgeHandler without victim calling QuantumBridge.deposit.\\n4) Victim loses control of the tokens (they are now stuck/locked in BridgeHandler unless another mechanism releases them).\",\n      \"suggested_fix\": \"Restrict BridgeHandler.deposit to only be callable by the trusted QuantumBridge contract (e.g., store bridge address and add onlyBridge modifier). Remove the depositer parameter and use msg.sender as depositor (or require(depositer == msg.sender)).\"\n    },\n    {\n      \"type\": \"Unchecked ERC20 transferFrom return value enabling false-positive deposits\",\n      \"severity\": \"medium\",\n      \"vulnerable_lines\": [57],\n      \"location\": \"BridgeHandler.deposit\",\n      \"explanation\": \"The return value of IERC20(tokenContract).transferFrom(...) is ignored. A malicious (or non-compliant) token can return false (or otherwise not transfer the expected amount) without reverting, while the bridge flow continues and QuantumBridge emits a Deposit event. If off-chain systems treat the event as proof of locked funds, this can lead to mint/unlock without actually securing funds in the handler.\",\n      \"attack_scenario\": \"1) Attacker ensures resourceID points to a token that returns false or transfers less than requested (e.g., malicious token; can be arranged via the unprotected setResource).\\n2) Attacker calls QuantumBridge.deposit with large amount.\\n3) transferFrom returns false / transfers 0, but BridgeHandler does not revert.\\n4) Deposit event is emitted and may be honored off-chain as a valid lock, enabling unbacked mint/unlock.\",\n      \"suggested_fix\": \"Use OpenZeppelin SafeERC20 (safeTransferFrom) or explicitly check the returned boolean: require(IERC20(tokenContract).transferFrom(...), \\\"TRANSFER_FROM_FAILED\\\"). Also consider balance-delta checks for fee-on-transfer tokens if exact amounts are required.\"\n    }\n  ],\n  \"overall_explanation\": \"The core issues are missing access control and missing caller validation in BridgeHandler. Any user can (1) remap resourceIDs to arbitrary token contracts and (2) call deposit directly with an arbitrary depositer address, allowing unauthorized pulling of tokens from victims who approved the handler. Additionally, ignoring transferFrom\u2019s return value can allow deposits to appear successful without locking funds, which is particularly dangerous for bridge systems relying on emitted events.\"\n}\n```"
+  },
+  "api_metrics": {
+    "input_tokens": 1516,
+    "output_tokens": 2894,
+    "latency_ms": 77122.12991714478
+  }
+}

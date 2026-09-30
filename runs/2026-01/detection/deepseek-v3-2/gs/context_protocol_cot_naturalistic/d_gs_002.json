@@ -1,0 +1,87 @@
+{
+  "sample_id": "gs_002",
+  "dataset": "gs",
+  "prompt_type": "context_protocol_cot_naturalistic",
+  "model": "deepseek-v3-2",
+  "timestamp": "2026-01-05T15:26:16.841169+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "logic_error",
+    "vulnerable_functions": [
+      "getSwapFee"
+    ],
+    "severity": "medium",
+    "description": "Governance can configure `DynamicSwapFeeModule` with fees up to 50%, but `CLFactory.getSwapFee` discards any value above 100_000 ppm (10%) and falls back to the tick-spacing default (often 500 ppm = 0.05%) without reverting or logging. Operators see the module reporting 20%, yet users continue paying the tiny default fee. The silent fallback misleads governance into believing higher fees are active. Impact - Governance believes a protective high fee is set (e.g., during launch anti-MEV), but the effective fee drops back to the default (e.g., 0.05%). - Traders are charged far less than intended, defeating protective or revenue objectives. - The misconfiguration has no on-chain signal, so the mistake can persist unnoticed. Root Cause - getSwapFee checks fee <= 100_000 ; larger values are ignored and the function returns tickSpacingToFee . - The module itself allows feeCap up to 500_000 (50%), so governance can set a value the factory immediately discards in favor of the default.",
+    "root_cause": "Governance can configure `DynamicSwapFeeModule` with fees up to 50%, but `CLFactory.getSwapFee` discards any value above 100_000 ppm (10%) and falls back to the tick-spacing default (often 500 ppm = 0.05%) without reverting or logging. Operators see the module reporting 20%, yet users continue paying the tiny default fee. The silent fallback misleads governance into believing higher fees are active. Impact - Governance believes a protective high fee is set (e.g., during launch anti-MEV), but the effective fee drops back to the default (e.g., 0.05%). - Traders are charged far less than intended, defeating protective or revenue objectives. - The misconfiguration has no on-chain signal, so the mistake can persist unnoticed. Root Cause - getSwapFee checks fee <= 100_000 ; larger values are ignored and the function returns tickSpacingToFee . - The module itself allows feeCap up to 500_000 (50%), so governance can set a value the factory immediately discards in favor of the default.",
+    "attack_scenario": "cd cl forge test --match-path test/PoC_DynamicFee_ClampToDefault.t.sol -vvv The PoC lifts the module cap, sets a 20% custom fee, and shows that `DynamicSwapFeeModule.getFee` returns 200_000 while `CLFactory.getSwapFee` still returns the base 500 ppm. PoC source ( `cl/test/PoC_DynamicFee_ClampToDefault.t.sol` ): // SPDX-License-Identifier: MIT pragma solidity 0.7.6; pragma abicoder v2; import \"forge-std/Test.sol\"; import {C4PoCTestbed} from \"./C4PoCTestbed.t.sol\"; import {DynamicSwapFeeModule} from \"contracts/core/fees/DynamicSwapFeeModule.sol\"; contract PoC_DynamicFee_ClampToDefault is C4PoCTestbed { address internal pool; function setUp() public override { super.setUp(); pool = poolFactory.createPool(USDC, DAI, 100, uint160(2 ** 96)); require(pool != address(0), \"pool not created\"); } function testFactoryClampsFeeAboveTenPercent() public { address manager = poolFactory.swapFeeManager(); vm.prank(manager); swapFeeModule.setFeeCap(pool, 500_000); // raise module cap to 50% vm.prank(manager); swapFeeModule.setScalingFactor(pool, 1); // ensure positive TWAP delta doesn't zero fee uint24 highFee = 200_000; // 20% vm.prank(manager); swapFeeModule.setCustomFee(pool, highFee); uint24 moduleFee = swapFeeModule.getFee(pool); assertEq(uint256(moduleFee), uint256(highFee), \"module reports configured fee\"); uint24 factoryFee = poolFactory.getSwapFee(pool); assertEq(uint256(factoryFee), 500, \"factory silently clamps to tick-spacing default\"); } }",
+    "fix_description": "Either revert when the module returns > 100_000 or raise the factory ceiling to match the module\u2019s cap. Emit events or add admin tooling to surface out-of-range configurations so operators can correct them. Hybra Finance mitigated: Added setMaxFee() function to make the fee cap configurable by the owner (up to 50%). This replaces the hardcoded limit and allows governance to adjust the maximum dynamic fee when needed.",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.85,
+    "vulnerabilities": [
+      {
+        "type": "Access Control / Authorization Bypass",
+        "severity": "critical",
+        "vulnerable_function": "setProtocolFeeManager",
+        "location": "Line ~150",
+        "explanation": "The setProtocolFeeManager function incorrectly requires msg.sender == protocolFeeManager instead of msg.sender == owner. This creates a circular dependency where only the current protocolFeeManager can change itself, and if protocolFeeManager is never set (defaults to owner), the owner cannot set it.",
+        "attack_scenario": "If protocolFeeManager is never initialized (remains as owner), the owner cannot call setProtocolFeeManager because msg.sender == owner != protocolFeeManager. This permanently locks the ability to change protocolFeeManager. Alternatively, if a malicious actor becomes protocolFeeManager, they can permanently lock control by refusing to change it.",
+        "suggested_fix": "Change the requirement to require(msg.sender == owner); to match the pattern used in setSwapFeeManager and setUnstakedFeeManager."
+      },
+      {
+        "type": "Missing Event Emission",
+        "severity": "medium",
+        "vulnerable_function": "setProtocolFeeModule, setProtocolFeeManager",
+        "location": "Lines ~145, ~150",
+        "explanation": "These functions change important state variables but do not emit events, unlike similar functions (setSwapFeeModule, setUnstakedFeeModule) which emit events. This breaks consistency and makes off-chain monitoring difficult.",
+        "attack_scenario": "Off-chain systems (indexers, monitoring tools, UIs) cannot detect when protocolFeeModule or protocolFeeManager changes, leading to stale data and potential operational issues.",
+        "suggested_fix": "Add event emissions for both functions, following the pattern of other setter functions: emit ProtocolFeeModuleChanged(oldModule, newModule) and emit ProtocolFeeManagerChanged(oldManager, newManager)."
+      },
+      {
+        "type": "Unbounded Gas Consumption",
+        "severity": "medium",
+        "vulnerable_function": "collectAllProtocolFees",
+        "location": "Line ~200",
+        "explanation": "The function iterates over all pools in a single transaction without any gas limit or pagination. As the number of pools grows, this function will eventually exceed the block gas limit and become unusable.",
+        "attack_scenario": "When the factory has deployed hundreds or thousands of pools, calling collectAllProtocolFees will revert due to out-of-gas, preventing the owner from collecting fees from all pools in one transaction.",
+        "suggested_fix": "Implement pagination with start and end indices, or allow collecting from specific pools only. Alternatively, remove this function and rely only on collectProtocolFees for individual pools."
+      },
+      {
+        "type": "Missing Input Validation",
+        "severity": "low",
+        "vulnerable_function": "createPool",
+        "location": "Line ~80",
+        "explanation": "The function does not validate that sqrtPriceX96 is non-zero or within reasonable bounds. While pools can theoretically be initialized with any sqrtPriceX96, a zero or extremely large value could cause issues in pool initialization.",
+        "attack_scenario": "A user could accidentally or maliciously create a pool with sqrtPriceX96 = 0, which might cause division by zero or other arithmetic issues in the pool's initialize function.",
+        "suggested_fix": "Add require(sqrtPriceX96 > 0, 'Invalid price'); or delegate validation to the pool's initialize function."
+      },
+      {
+        "type": "Inconsistent Fee Validation",
+        "severity": "low",
+        "vulnerable_function": "getSwapFee, getUnstakedFee, getProtocolFee",
+        "location": "Lines ~160, ~175, ~185",
+        "explanation": "Each fee getter function has different upper bounds for validating fees returned from modules: getSwapFee uses 100_000, getUnstakedFee uses 1_000_000, and getProtocolFee uses 500_000. This inconsistency could lead to confusion and unexpected behavior.",
+        "attack_scenario": "A fee module might return a fee that's valid for one getter but invalid for another, causing inconsistent fee application across different fee types.",
+        "suggested_fix": "Standardize the fee validation logic or document the different fee ranges clearly. Consider moving validation constants to immutable variables."
+      }
+    ],
+    "overall_explanation": "The contract has a critical access control flaw in setProtocolFeeManager that could permanently lock management of protocol fees. Other issues include missing events, unbounded gas consumption in fee collection, and minor inconsistencies. The core pool creation and fee logic appears sound, but the authorization model needs immediate correction. The use of ExcessivelySafeCall for fee modules is good practice for handling external calls safely."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.85,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Access Control / Authorization Bypass\",\n      \"severity\": \"critical\",\n      \"vulnerable_function\": \"setProtocolFeeManager\",\n      \"location\": \"Line ~150\",\n      \"explanation\": \"The setProtocolFeeManager function incorrectly requires msg.sender == protocolFeeManager instead of msg.sender == owner. This creates a circular dependency where only the current protocolFeeManager can change itself, and if protocolFeeManager is never set (defaults to owner), the owner cannot set it.\",\n      \"attack_scenario\": \"If protocolFeeManager is never initialized (remains as owner), the owner cannot call setProtocolFeeManager because msg.sender == owner != protocolFeeManager. This permanently locks the ability to change protocolFeeManager. Alternatively, if a malicious actor becomes protocolFeeManager, they can permanently lock control by refusing to change it.\",\n      \"suggested_fix\": \"Change the requirement to require(msg.sender == owner); to match the pattern used in setSwapFeeManager and setUnstakedFeeManager.\"\n    },\n    {\n      \"type\": \"Missing Event Emission\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"setProtocolFeeModule, setProtocolFeeManager\",\n      \"location\": \"Lines ~145, ~150\",\n      \"explanation\": \"These functions change important state variables but do not emit events, unlike similar functions (setSwapFeeModule, setUnstakedFeeModule) which emit events. This breaks consistency and makes off-chain monitoring difficult.\",\n      \"attack_scenario\": \"Off-chain systems (indexers, monitoring tools, UIs) cannot detect when protocolFeeModule or protocolFeeManager changes, leading to stale data and potential operational issues.\",\n      \"suggested_fix\": \"Add event emissions for both functions, following the pattern of other setter functions: emit ProtocolFeeModuleChanged(oldModule, newModule) and emit ProtocolFeeManagerChanged(oldManager, newManager).\"\n    },\n    {\n      \"type\": \"Unbounded Gas Consumption\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"collectAllProtocolFees\",\n      \"location\": \"Line ~200\",\n      \"explanation\": \"The function iterates over all pools in a single transaction without any gas limit or pagination. As the number of pools grows, this function will eventually exceed the block gas limit and become unusable.\",\n      \"attack_scenario\": \"When the factory has deployed hundreds or thousands of pools, calling collectAllProtocolFees will revert due to out-of-gas, preventing the owner from collecting fees from all pools in one transaction.\",\n      \"suggested_fix\": \"Implement pagination with start and end indices, or allow collecting from specific pools only. Alternatively, remove this function and rely only on collectProtocolFees for individual pools.\"\n    },\n    {\n      \"type\": \"Missing Input Validation\",\n      \"severity\": \"low\",\n      \"vulnerable_function\": \"createPool\",\n      \"location\": \"Line ~80\",\n      \"explanation\": \"The function does not validate that sqrtPriceX96 is non-zero or within reasonable bounds. While pools can theoretically be initialized with any sqrtPriceX96, a zero or extremely large value could cause issues in pool initialization.\",\n      \"attack_scenario\": \"A user could accidentally or maliciously create a pool with sqrtPriceX96 = 0, which might cause division by zero or other arithmetic issues in the pool's initialize function.\",\n      \"suggested_fix\": \"Add require(sqrtPriceX96 > 0, 'Invalid price'); or delegate validation to the pool's initialize function.\"\n    },\n    {\n      \"type\": \"Inconsistent Fee Validation\",\n      \"severity\": \"low\",\n      \"vulnerable_function\": \"getSwapFee, getUnstakedFee, getProtocolFee\",\n      \"location\": \"Lines ~160, ~175, ~185\",\n      \"explanation\": \"Each fee getter function has different upper bounds for validating fees returned from modules: getSwapFee uses 100_000, getUnstakedFee uses 1_000_000, and getProtocolFee uses 500_000. This inconsistency could lead to confusion and unexpected behavior.\",\n      \"attack_scenario\": \"A fee module might return a fee that's valid for one getter but invalid for another, causing inconsistent fee application across different fee types.\",\n      \"suggested_fix\": \"Standardize the fee validation logic or document the different fee ranges clearly. Consider moving validation constants to immutable variables.\"\n    }\n  ],\n  \"overall_explanation\": \"The contract has a critical access control flaw in setProtocolFeeManager that could permanently lock management of protocol fees. Other issues include missing events, unbounded gas consumption in fee collection, and minor inconsistencies. The core pool creation and fee logic appears sound, but the authorization model needs immediate correction. The use of ExcessivelySafeCall for fee modules is good practice for handling external calls safely.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": false,
+    "context_file_count": 0,
+    "has_protocol_doc": true
+  },
+  "api_metrics": {
+    "input_tokens": 3162,
+    "output_tokens": 1069,
+    "latency_ms": 140963.7849330902
+  }
+}

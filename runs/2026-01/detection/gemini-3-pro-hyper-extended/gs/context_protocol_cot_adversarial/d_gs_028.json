@@ -1,0 +1,60 @@
+{
+  "sample_id": "gs_028",
+  "dataset": "gs",
+  "prompt_type": "context_protocol_cot_adversarial",
+  "model": "gemini-3-pro-hyper-extended",
+  "timestamp": "2026-01-05T16:13:37.889178+00:00",
+  "ground_truth": {
+    "is_vulnerable": true,
+    "vulnerability_type": "access_control",
+    "vulnerable_functions": [
+      "recover"
+    ],
+    "severity": "high",
+    "description": "When a wallet is behind a checkpointer and a chained signature is used with bit 6 (checkpointer usage flag) set to zero, BaseSig.recover skips the checkpointer validation block (BaseSig.sol:88-106). This leaves _checkpointer and snapshot unset (zero-valued). In recoverChained, the checkpointer is ignored, and the signature validation passes even if the checkpointer should be enforced. The final validation succeeds because snapshot.imageHash == bytes32(0) as the checkpointer is ignored.",
+    "root_cause": "When a wallet is behind a checkpointer and a chained signature is used with bit 6 (checkpointer usage flag) set to zero, BaseSig.recover skips the checkpointer validation block (BaseSig.sol:88-106). This leaves _checkpointer and snapshot unset (zero-valued). In recoverChained, the checkpointer is ignored, and the signature validation passes even if the checkpointer should be enforced. The final validation succeeds because snapshot.imageHash == bytes32(0) as the checkpointer is ignored.",
+    "attack_scenario": "An evicted signer can sign a payload valid under stale wallet configuration and bypass checkpointer validation. PoC: Add test case to BaseSigTest and run forge test --match-test test_PoC_checkpointer_bypass. The test constructs a chained signature with checkpointer disabled, mocks the checkpointer response, and asserts successful recovery with correct image hash.",
+    "fix_description": "Do not permit checkpointer to be disabled (bit 6 unset) if chained signature is used. Revert in this case with custom error. Example fix in BaseSig.sol:\nif (signatureFlag & 0x40 == 0) {\n    revert MissingCheckpointer();\n}",
+    "language": "solidity"
+  },
+  "prediction": {
+    "verdict": "vulnerable",
+    "confidence": 0.95,
+    "vulnerabilities": [
+      {
+        "type": "Parsing Inconsistency / Signature Forgery",
+        "severity": "critical",
+        "vulnerable_function": "recover",
+        "location": "BaseSig.sol: recover function",
+        "explanation": "In the `recover` function, when `signatureFlag & 0x40` is set (indicating a checkpointer is present) and `_checkpointer` is `address(0)`, the code attempts to read the checkpointer address and data from the signature. However, the logic to read the `checkpointerDataSize` and advance the `rindex` past the checkpointer data is wrapped inside `if (!_ignoreCheckpointer)`. \n\nWhen `recoverChained` calls `recover`, it passes `_ignoreCheckpointer = true`. This causes the `recover` function to read the checkpointer address but **fail to advance `rindex` past the checkpointer data**. \n\nAs a result, the function continues to parse the subsequent signature fields (checkpoint, threshold, and the Merkle tree) using the bytes intended for the checkpointer data. An attacker can craft the checkpointer data bytes to be interpreted as a valid signature with `threshold = 0` or arbitrary `imageHash`, allowing them to forge a link in the signature chain and bypass authentication.",
+        "attack_scenario": "1. Attacker constructs a chained signature payload.\n2. One of the signatures in the chain (e.g., the one validating a configuration update) has the `0x40` flag set.\n3. `recoverChained` calls `recover` with `_ignoreCheckpointer = true`.\n4. `recover` reads the checkpointer address but skips the block that reads `checkpointerDataSize` and advances `rindex`.\n5. The parsing logic continues, interpreting the `checkpointerDataSize` and `checkpointerData` bytes as the `checkpoint`, `threshold`, and signature tree.\n6. The attacker crafts these bytes to decode into a `threshold` of 0 and a `weight` of 0 (which satisfies `weight >= threshold`), effectively forging a valid signature for any configuration update.\n7. This allows the attacker to authorize any operation on the wallet.",
+        "suggested_fix": "Move the reading of `checkpointerDataSize` and the advancement of `rindex` outside the `if (!_ignoreCheckpointer)` block. The `rindex` must always be advanced to skip the data, regardless of whether the checkpointer logic is executed.\n\n```solidity\n      uint256 checkpointerDataSize;\n      (checkpointerDataSize, rindex) = _signature.readUint24(rindex);\n\n      if (!_ignoreCheckpointer) {\n        bytes memory checkpointerData = _signature[rindex:rindex + checkpointerDataSize];\n        snapshot = ICheckpointer(_checkpointer).snapshotFor(address(this), checkpointerData);\n      }\n      \n      rindex += checkpointerDataSize;\n```"
+      },
+      {
+        "type": "Missing Functionality / Locked Funds",
+        "severity": "medium",
+        "vulnerable_function": "N/A",
+        "location": "UnstakeRequestsManager.sol",
+        "explanation": "The `UnstakeRequestsManager` contract defines a `REQUEST_CANCELLER_ROLE` and an `UnstakeRequestCancelled` event, implying that unstake requests are intended to be cancellable. However, there is no function implemented in the contract that allows cancelling a request. If the oracle fails to update or the finalization conditions become unreachable, users' mETH tokens locked in the contract cannot be retrieved.",
+        "attack_scenario": "1. A user creates an unstake request, locking mETH in the contract.\n2. The oracle stops updating, or the `numberOfBlocksToFinalize` is set to an unreachable value.\n3. The request never becomes finalized (`_isFinalized` returns false).\n4. The user cannot claim their ETH.\n5. An admin with `REQUEST_CANCELLER_ROLE` attempts to cancel the request to refund the user, but finds no function to do so.\n6. The funds are permanently locked.",
+        "suggested_fix": "Implement a `cancelRequest(uint256 requestID)` function that can be called by the `REQUEST_CANCELLER_ROLE` (or the requester, depending on business logic) to delete the request and refund the locked mETH."
+      }
+    ],
+    "overall_explanation": "The audit identified a critical parsing vulnerability in the `BaseSig` library that allows for signature forgery in chained signatures. By exploiting the conditional parsing logic for checkpointers, an attacker can desynchronize the signature parser and inject arbitrary values for threshold and weights, bypassing authentication. Additionally, the `UnstakeRequestsManager` contract is missing critical functionality (cancellation) that could lead to locked funds if the oracle fails."
+  },
+  "parsing": {
+    "success": true,
+    "errors": [],
+    "raw_response": "```json\n{\n  \"verdict\": \"vulnerable\",\n  \"confidence\": 0.95,\n  \"vulnerabilities\": [\n    {\n      \"type\": \"Parsing Inconsistency / Signature Forgery\",\n      \"severity\": \"critical\",\n      \"vulnerable_function\": \"recover\",\n      \"location\": \"BaseSig.sol: recover function\",\n      \"explanation\": \"In the `recover` function, when `signatureFlag & 0x40` is set (indicating a checkpointer is present) and `_checkpointer` is `address(0)`, the code attempts to read the checkpointer address and data from the signature. However, the logic to read the `checkpointerDataSize` and advance the `rindex` past the checkpointer data is wrapped inside `if (!_ignoreCheckpointer)`. \\n\\nWhen `recoverChained` calls `recover`, it passes `_ignoreCheckpointer = true`. This causes the `recover` function to read the checkpointer address but **fail to advance `rindex` past the checkpointer data**. \\n\\nAs a result, the function continues to parse the subsequent signature fields (checkpoint, threshold, and the Merkle tree) using the bytes intended for the checkpointer data. An attacker can craft the checkpointer data bytes to be interpreted as a valid signature with `threshold = 0` or arbitrary `imageHash`, allowing them to forge a link in the signature chain and bypass authentication.\",\n      \"attack_scenario\": \"1. Attacker constructs a chained signature payload.\\n2. One of the signatures in the chain (e.g., the one validating a configuration update) has the `0x40` flag set.\\n3. `recoverChained` calls `recover` with `_ignoreCheckpointer = true`.\\n4. `recover` reads the checkpointer address but skips the block that reads `checkpointerDataSize` and advances `rindex`.\\n5. The parsing logic continues, interpreting the `checkpointerDataSize` and `checkpointerData` bytes as the `checkpoint`, `threshold`, and signature tree.\\n6. The attacker crafts these bytes to decode into a `threshold` of 0 and a `weight` of 0 (which satisfies `weight >= threshold`), effectively forging a valid signature for any configuration update.\\n7. This allows the attacker to authorize any operation on the wallet.\",\n      \"suggested_fix\": \"Move the reading of `checkpointerDataSize` and the advancement of `rindex` outside the `if (!_ignoreCheckpointer)` block. The `rindex` must always be advanced to skip the data, regardless of whether the checkpointer logic is executed.\\n\\n```solidity\\n      uint256 checkpointerDataSize;\\n      (checkpointerDataSize, rindex) = _signature.readUint24(rindex);\\n\\n      if (!_ignoreCheckpointer) {\\n        bytes memory checkpointerData = _signature[rindex:rindex + checkpointerDataSize];\\n        snapshot = ICheckpointer(_checkpointer).snapshotFor(address(this), checkpointerData);\\n      }\\n      \\n      rindex += checkpointerDataSize;\\n```\"\n    },\n    {\n      \"type\": \"Missing Functionality / Locked Funds\",\n      \"severity\": \"medium\",\n      \"vulnerable_function\": \"N/A\",\n      \"location\": \"UnstakeRequestsManager.sol\",\n      \"explanation\": \"The `UnstakeRequestsManager` contract defines a `REQUEST_CANCELLER_ROLE` and an `UnstakeRequestCancelled` event, implying that unstake requests are intended to be cancellable. However, there is no function implemented in the contract that allows cancelling a request. If the oracle fails to update or the finalization conditions become unreachable, users' mETH tokens locked in the contract cannot be retrieved.\",\n      \"attack_scenario\": \"1. A user creates an unstake request, locking mETH in the contract.\\n2. The oracle stops updating, or the `numberOfBlocksToFinalize` is set to an unreachable value.\\n3. The request never becomes finalized (`_isFinalized` returns false).\\n4. The user cannot claim their ETH.\\n5. An admin with `REQUEST_CANCELLER_ROLE` attempts to cancel the request to refund the user, but finds no function to do so.\\n6. The funds are permanently locked.\",\n      \"suggested_fix\": \"Implement a `cancelRequest(uint256 requestID)` function that can be called by the `REQUEST_CANCELLER_ROLE` (or the requester, depending on business logic) to delete the request and refund the locked mETH.\"\n    }\n  ],\n  \"overall_explanation\": \"The audit identified a critical parsing vulnerability in the `BaseSig` library that allows for signature forgery in chained signatures. By exploiting the conditional parsing logic for checkpointers, an attacker can desynchronize the signature parser and inject arbitrary values for threshold and weights, bypassing authentication. Additionally, the `UnstakeRequestsManager` contract is missing critical functionality (cancellation) that could lead to locked funds if the oracle fails.\"\n}\n```"
+  },
+  "context_info": {
+    "has_context_files": true,
+    "context_file_count": 1,
+    "has_protocol_doc": true
+  },
+  "api_metrics": {
+    "input_tokens": 8228,
+    "output_tokens": 19246,
+    "latency_ms": 186120.86987495422
+  }
+}
