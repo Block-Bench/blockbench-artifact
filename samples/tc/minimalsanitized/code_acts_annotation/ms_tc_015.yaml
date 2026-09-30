@@ -1,0 +1,391 @@
+schema_version: "1.0"
+sample_id: "ms_tc_015"
+vulnerability_type: "pool_manipulation"
+vulnerable_lines: [101]
+
+# Full line coverage for scoring. UNRELATED items are batched for efficiency.
+# Detailed rationales only for security-relevant code acts.
+
+code_acts:
+
+  # ============================================
+  # SECURITY-RELEVANT CODE ACTS (detailed)
+  # ============================================
+
+  - id: "CA1"
+    type: "DECLARATION"
+    lines: [11, 12, 13, 14, 15]
+    code: |
+      struct Token {
+          address addr;
+          uint256 balance;
+          uint256 weight; // stored as percentage (100 = 100%)
+      }
+    security_function: "BENIGN"
+    rationale: "Token struct declaration. Data container, not a prerequisite."
+
+  - id: "CA2"
+    type: "DECLARATION"
+    lines: [17]
+    code: "mapping(address => Token) public tokens;"
+    security_function: "BENIGN"
+    rationale: "Token mapping declaration. Data container, not a prerequisite."
+
+  - id: "CA3"
+    type: "DECLARATION"
+    lines: [18, 19]
+    code: |
+      address[] public tokenList;
+      uint256 public totalWeight;
+    security_function: "BENIGN"
+    rationale: "Token list and total weight tracking."
+
+  - id: "CA4"
+    type: "STATE_MOD"
+    lines: [25, 26, 27, 28]
+    code: |
+      function addToken(address token, uint256 initialWeight) external {
+          tokens[token] = Token({addr: token, balance: 0, weight: initialWeight});
+          tokenList.push(token);
+      }
+    security_function: "BENIGN"
+    rationale: "Token addition. Initial weight is set but can be manipulated via _updateWeights."
+
+  - id: "CA5"
+    type: "INPUT_VAL"
+    lines: [38, 39]
+    code: |
+      require(tokens[tokenIn].addr != address(0), "Invalid token");
+      require(tokens[tokenOut].addr != address(0), "Invalid token");
+    security_function: "BENIGN"
+    rationale: "Token validation in swap. Correctly checks token existence."
+
+  - id: "CA6"
+    type: "EXT_CALL"
+    lines: [42]
+    code: "IERC20(tokenIn).transfer(address(this), amountIn);"
+    security_function: "BENIGN"
+    rationale: "Token transfer in. Note: Should be transferFrom."
+
+  - id: "CA7"
+    type: "STATE_MOD"
+    lines: [43]
+    code: "tokens[tokenIn].balance += amountIn;"
+    security_function: "BENIGN"
+    rationale: "Balance update in swap. Correct behavior - the vulnerability is how balances are interpreted, not that they change."
+
+  - id: "CA8"
+    type: "COMPUTATION"
+    lines: [46]
+    code: "amountOut = calculateSwapAmount(tokenIn, tokenOut, amountIn);"
+    security_function: "BENIGN"
+    rationale: "Swap amount calculation call. Uses weights, but the root cause is how weights are computed."
+
+  - id: "CA9"
+    type: "INPUT_VAL"
+    lines: [49, 50, 51, 52]
+    code: |
+      require(
+          tokens[tokenOut].balance >= amountOut,
+          "Insufficient liquidity"
+      );
+    security_function: "BENIGN"
+    rationale: "Liquidity check. Correctly validates pool has enough tokens."
+
+  - id: "CA10"
+    type: "STATE_MOD"
+    lines: [53]
+    code: "tokens[tokenOut].balance -= amountOut;"
+    security_function: "BENIGN"
+    rationale: "Balance update for token out."
+
+  - id: "CA11"
+    type: "EXT_CALL"
+    lines: [54]
+    code: "IERC20(tokenOut).transfer(msg.sender, amountOut);"
+    security_function: "BENIGN"
+    rationale: "Token transfer out. State updated before call."
+
+  - id: "CA12"
+    type: "CTRL_FLOW"
+    lines: [56]
+    code: "_updateWeights();"
+    security_function: "BENIGN"
+    rationale: "Call site to _updateWeights. The vulnerability is the formula inside _updateWeights (CA15), not this call."
+
+  - id: "CA13"
+    type: "COMPUTATION"
+    lines: [64, 65, 66, 67, 68, 69, 70, 71, 76, 77, 78, 79, 80, 82]
+    code: |
+      function calculateSwapAmount(
+          address tokenIn,
+          address tokenOut,
+          uint256 amountIn
+      ) public view returns (uint256) {
+          uint256 weightIn = tokens[tokenIn].weight;
+          uint256 weightOut = tokens[tokenOut].weight;
+          ...
+          return numerator / denominator;
+      }
+    security_function: "BENIGN"
+    rationale: "Swap calculation function. Uses weights but the root cause is the weight computation, not how weights are consumed."
+
+  - id: "CA14"
+    type: "COMPUTATION"
+    lines: [85, 86, 89, 90, 91, 92, 93, 94]
+    code: |
+      function _updateWeights() internal {
+          uint256 totalValue = 0;
+          // Calculate total value in pool
+          for (uint256 i = 0; i < tokenList.length; i++) {
+              address token = tokenList[i];
+              totalValue += tokens[token].balance;
+          }
+      }
+    security_function: "BENIGN"
+    rationale: "Total value calculation. Mechanical computation summing balances."
+
+  - id: "CA15"
+    type: "COMPUTATION"
+    lines: [97, 98, 101, 102]
+    code: |
+      for (uint256 i = 0; i < tokenList.length; i++) {
+          address token = tokenList[i];
+          tokens[token].weight = (tokens[token].balance * 100) / totalValue;
+      }
+    security_function: "ROOT_CAUSE"
+    rationale: "ROOT_CAUSE - Recomputes weights proportional to balance. Attacker can manipulate balance via large swaps to skew weights, then exploit the incorrect weights for profitable subsequent swaps."
+
+  - id: "CA16"
+    type: "CTRL_FLOW"
+    lines: [108, 109, 110]
+    code: |
+      function getWeight(address token) external view returns (uint256) {
+          return tokens[token].weight;
+      }
+    security_function: "BENIGN"
+    rationale: "View function for weight. No security impact."
+
+  - id: "CA17"
+    type: "INPUT_VAL"
+    lines: [116]
+    code: 'require(tokens[token].addr != address(0), "Invalid token");'
+    security_function: "BENIGN"
+    rationale: "Token validation in addLiquidity."
+
+  - id: "CA18"
+    type: "EXT_CALL"
+    lines: [117]
+    code: "IERC20(token).transfer(address(this), amount);"
+    security_function: "BENIGN"
+    rationale: "Token transfer in addLiquidity. Note: Should be transferFrom."
+
+  - id: "CA19"
+    type: "STATE_MOD"
+    lines: [118]
+    code: "tokens[token].balance += amount;"
+    security_function: "BENIGN"
+    rationale: "Balance update in addLiquidity. Normal behavior, not a prerequisite."
+
+  - id: "CA20"
+    type: "CTRL_FLOW"
+    lines: [119]
+    code: "_updateWeights();"
+    security_function: "BENIGN"
+    rationale: "Call site to _updateWeights in addLiquidity. Alternative entry point, not a prerequisite."
+
+  # ============================================
+  # BATCHED UNRELATED CODE ACTS (for scoring)
+  # ============================================
+
+  - id: "CA_DIRECTIVES"
+    type: "DIRECTIVE"
+    lines: [1, 2]
+    security_function: "UNRELATED"
+    rationale: "License and pragma statements"
+
+  - id: "CA_COMMENTS"
+    type: "COMMENT"
+    lines: [30, 31, 32, 41, 45, 48, 61, 62, 63, 73, 74, 75, 88, 91, 92, 96, 100, 105, 106, 107, 112, 113, 114]
+    security_function: "UNRELATED"
+    rationale: "Inline comments and NatSpec documentation"
+
+  - id: "CA_DECLARATIONS"
+    type: "DECLARATION"
+    lines: [4, 5, 7, 8, 10, 21, 22, 33, 34, 35, 36, 37, 57, 115, 120, 121]
+    security_function: "UNRELATED"
+    rationale: "Interface, contract, constructor, and function signature declarations"
+
+  - id: "CA_SYNTAX"
+    type: "SYNTAX"
+    lines: [6, 28, 58, 83, 103]
+    security_function: "UNRELATED"
+    rationale: "Closing braces"
+
+summary:
+  total_code_acts: 24
+  total_lines_covered: 98  # excludes 23 empty lines
+
+  by_security_function:
+    ROOT_CAUSE: 1      # CA15
+    PREREQ: 0
+    BENIGN: 19         # CA1-CA14, CA16-CA20
+    UNRELATED: 4       # batched
+
+  root_causes:
+    - id: "CA15"
+      lines: [97, 98, 101, 102]
+      type: "COMPUTATION"
+      description: "Weight recomputation based on instantaneous manipulable balances - weight = balance/totalBalance formula"
+
+line_to_code_act:
+  # Directives (UNRELATED)
+  1: "CA_DIRECTIVES"
+  2: "CA_DIRECTIVES"
+  # Line 3: empty
+  # IERC20 interface (UNRELATED)
+  4: "CA_DECLARATIONS"
+  5: "CA_DECLARATIONS"
+  # Line 6: empty
+  7: "CA_DECLARATIONS"
+  8: "CA_DECLARATIONS"
+  # Line 9: empty
+  # IndexPool contract
+  10: "CA_DECLARATIONS"
+  11: "CA1"
+  12: "CA1"
+  13: "CA1"
+  14: "CA1"
+  15: "CA1"
+  # Line 16: empty
+  17: "CA2"
+  18: "CA3"
+  19: "CA3"
+  # Line 20: empty
+  21: "CA_DECLARATIONS"
+  22: "CA_DECLARATIONS"
+  23: "CA_SYNTAX"  # Closing brace of Token struct
+  # Line 24: empty
+  25: "CA4"
+  26: "CA4"
+  27: "CA4"
+  28: "CA4"  # Closing brace of addToken function
+  # Line 29: empty
+  30: "CA_COMMENTS"
+  31: "CA_COMMENTS"
+  32: "CA_COMMENTS"
+  33: "CA_DECLARATIONS"
+  34: "CA_DECLARATIONS"
+  35: "CA_DECLARATIONS"
+  36: "CA_DECLARATIONS"
+  37: "CA_DECLARATIONS"
+  38: "CA5"
+  39: "CA5"
+  # Line 40: empty
+  41: "CA_COMMENTS"
+  42: "CA6"
+  43: "CA7"
+  # Line 44: empty
+  45: "CA_COMMENTS"
+  46: "CA8"
+  # Line 47: empty
+  48: "CA_COMMENTS"
+  49: "CA9"
+  50: "CA9"
+  51: "CA9"
+  52: "CA9"
+  53: "CA10"
+  54: "CA11"
+  # Line 55: empty
+  56: "CA12"
+  # Line 57: empty
+  58: "CA_SYNTAX"
+  59: "CA_SYNTAX"  # Closing brace
+  # Line 60: empty
+  61: "CA_COMMENTS"
+  62: "CA_COMMENTS"
+  63: "CA_COMMENTS"
+  64: "CA13"
+  65: "CA13"
+  66: "CA13"
+  67: "CA13"
+  68: "CA13"
+  69: "CA13"
+  70: "CA13"
+  71: "CA13"
+  # Line 72: empty
+  73: "CA_COMMENTS"
+  74: "CA_COMMENTS"
+  # Line 75: empty
+  76: "CA13"
+  77: "CA13"
+  78: "CA13"
+  79: "CA13"
+  80: "CA13"
+  # Line 81: empty
+  82: "CA13"
+  83: "CA_SYNTAX"
+  # Line 84: empty
+  85: "CA14"
+  86: "CA14"
+  # Line 87: empty
+  88: "CA_COMMENTS"
+  89: "CA14"
+  90: "CA14"
+  91: "CA14"  # Comment is part of CA14 block
+  92: "CA14"  # Comment is part of CA14 block
+  93: "CA14"
+  94: "CA14"
+  # Line 95: empty
+  96: "CA_COMMENTS"
+  97: "CA15"
+  98: "CA15"
+  # Line 99: empty
+  # Line 100: empty
+  101: "CA15"
+  102: "CA15"
+  103: "CA_SYNTAX"
+  # Line 104: empty
+  105: "CA_COMMENTS"
+  106: "CA_COMMENTS"
+  107: "CA_COMMENTS"
+  108: "CA16"
+  109: "CA16"
+  110: "CA16"
+  # Line 111: empty
+  112: "CA_COMMENTS"
+  113: "CA_COMMENTS"
+  114: "CA_COMMENTS"
+  115: "CA_DECLARATIONS"
+  116: "CA17"
+  117: "CA18"
+  118: "CA19"
+  119: "CA20"
+  120: "CA_DECLARATIONS"
+  121: "CA_DECLARATIONS"
+
+code_act_security_functions:
+  CA1: "BENIGN"
+  CA2: "BENIGN"
+  CA3: "BENIGN"
+  CA4: "BENIGN"
+  CA5: "BENIGN"
+  CA6: "BENIGN"
+  CA7: "BENIGN"
+  CA8: "BENIGN"
+  CA9: "BENIGN"
+  CA10: "BENIGN"
+  CA11: "BENIGN"
+  CA12: "BENIGN"
+  CA13: "BENIGN"
+  CA14: "BENIGN"
+  CA15: "ROOT_CAUSE"
+  CA16: "BENIGN"
+  CA17: "BENIGN"
+  CA18: "BENIGN"
+  CA19: "BENIGN"
+  CA20: "BENIGN"
+  CA_DIRECTIVES: "UNRELATED"
+  CA_COMMENTS: "UNRELATED"
+  CA_DECLARATIONS: "UNRELATED"
+  CA_SYNTAX: "UNRELATED"

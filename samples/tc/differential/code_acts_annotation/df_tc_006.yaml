@@ -1,0 +1,370 @@
+schema_version: "1.0"
+sample_id: "df_tc_006"
+base_sample_id: "ms_tc_006"
+vulnerability_type: "price_oracle_manipulation"
+vulnerability_subtype: "flash_loan_oracle_manipulation"
+is_vulnerable: false
+
+# Differential annotation tracks Security Function transitions from vulnerable to fixed version.
+
+vulnerability_summary:
+  type: "price_oracle_manipulation"
+  severity: "critical"
+  affected_functions: ["borrow", "calculateBorrowPower"]
+  root_cause_summary: "In ms_tc_006, oracle.getUnderlyingPrice() was called directly without manipulation resistance. Attacker could flash loan to manipulate AMM pool prices and inflate collateral value."
+  fix_summary: "Added price deviation protection: cached prices, MAX_PRICE_DEVIATION constant, _validatePrice() function that rejects prices deviating >10% from cached price."
+
+code_acts:
+
+  # ============================================
+  # TRANSITIONED CODE ACTS (ROOT_CAUSE -> BENIGN)
+  # ============================================
+
+  - id: "CA13"
+    type: "EXT_CALL"
+    description: "Oracle price call in borrow()"
+
+    vulnerable:
+      file: "ms_tc_006.sol"
+      function: "borrow"
+      lines: [70, 71]
+      code: "uint256 borrowValue = (oracle.getUnderlyingPrice(cToken) * amount) / 1e18;"
+      security_function: "ROOT_CAUSE"
+      rationale: "Direct spot price from manipulable oracle"
+
+    fixed:
+      file: "df_tc_006.sol"
+      function: "borrow"
+      lines: [95, 96]
+      code: "uint256 price = _validatePrice(cToken); uint256 borrowValue = (price * amount) / 1e18;"
+      security_function: "BENIGN"
+      rationale: "Now uses _validatePrice() which checks deviation from cached price"
+
+    transition: "ROOT_CAUSE -> BENIGN"
+    transition_reason: "Price validation prevents flash loan manipulation"
+
+  - id: "CA20"
+    type: "EXT_CALL"
+    description: "Oracle price call in calculateBorrowPower()"
+
+    vulnerable:
+      file: "ms_tc_006.sol"
+      function: "calculateBorrowPower"
+      line: 102
+      code: "uint256 price = oracle.getUnderlyingPrice(cToken);"
+      security_function: "ROOT_CAUSE"
+      rationale: "Oracle returns manipulated spot price, inflating collateral value"
+
+    fixed:
+      file: "df_tc_006.sol"
+      function: "calculateBorrowPower"
+      line: 126
+      code: "uint256 price = oracle.getUnderlyingPrice(cToken);"
+      security_function: "BENIGN"
+      rationale: "calculateBorrowPower is a view function; actual borrowing uses validated prices"
+
+    transition: "ROOT_CAUSE -> BENIGN"
+    transition_reason: "Borrow path uses validated prices; view function doesn't authorize borrowing"
+    note: "Ideally this should also use validated price, but vulnerability is blocked at borrow() level"
+
+  # ============================================
+  # NEW CODE ACTS (fix additions)
+  # ============================================
+
+  - id: "CA_FIX1"
+    type: "DECLARATION"
+    description: "Price tracking state variables (NEW)"
+
+    fixed:
+      file: "df_tc_006.sol"
+      function: "contract-level"
+      lines: [41, 42, 43, 44]
+      code: |
+        mapping(address => uint256) public lastKnownPrice;
+        mapping(address => uint256) public lastPriceUpdate;
+        uint256 public constant MAX_PRICE_DEVIATION = 10;
+        uint256 public constant MIN_PRICE_UPDATE_INTERVAL = 1 hours;
+      security_function: "BENIGN"
+      rationale: "NEW FIX: State variables for price deviation protection"
+
+    transition: "NEW -> BENIGN"
+    transition_reason: "Added as foundation for price validation"
+
+  - id: "CA_FIX2"
+    type: "INPUT_VAL"
+    description: "_validatePrice() function (NEW)"
+
+    fixed:
+      file: "df_tc_006.sol"
+      function: "_validatePrice"
+      lines: [53, 54, 55, 57, 58, 59, 60, 61, 63, 64]
+      code: |
+        function _validatePrice(address cToken) internal view returns (uint256) {
+            uint256 currentPrice = oracle.getUnderlyingPrice(cToken);
+            uint256 lastPrice = lastKnownPrice[cToken];
+            if (lastPrice > 0 && block.timestamp < lastPriceUpdate[cToken] + MIN_PRICE_UPDATE_INTERVAL) {
+                uint256 maxAllowed = lastPrice * (100 + MAX_PRICE_DEVIATION) / 100;
+                uint256 minAllowed = lastPrice * (100 - MAX_PRICE_DEVIATION) / 100;
+                require(currentPrice >= minAllowed && currentPrice <= maxAllowed, "Price deviation too high");
+            }
+            return currentPrice;
+        }
+      security_function: "BENIGN"
+      rationale: "NEW FIX: Rejects prices deviating >10% from cached price within update interval"
+
+    transition: "NEW -> BENIGN"
+    transition_reason: "Primary fix that prevents flash loan manipulation"
+
+  - id: "CA_FIX3"
+    type: "STATE_MOD"
+    description: "updateCachedPrice() admin function (NEW)"
+
+    fixed:
+      file: "df_tc_006.sol"
+      function: "updateCachedPrice"
+      lines: [178, 179, 180, 181]
+      code: |
+        function updateCachedPrice(address cToken) external {
+          lastKnownPrice[cToken] = oracle.getUnderlyingPrice(cToken);
+          lastPriceUpdate[cToken] = block.timestamp;
+        }
+      security_function: "BENIGN"
+      rationale: "NEW FIX: Admin function to update cached prices"
+
+    transition: "NEW -> BENIGN"
+    transition_reason: "Added to maintain price cache"
+
+  # ============================================
+  # TRANSITIONED (PREREQ -> BENIGN)
+  # ============================================
+
+  - id: "CA1"
+    type: "DECLARATION"
+    description: "Oracle storage"
+
+    vulnerable:
+      file: "ms_tc_006.sol"
+      line: 20
+      security_function: "PREREQ"
+      rationale: "Stores manipulable oracle reference"
+
+    fixed:
+      file: "df_tc_006.sol"
+      lines: [26, 29, 32, 35, 38]
+      security_function: "BENIGN"
+      rationale: "Oracle still used but prices are validated"
+
+    transition: "PREREQ -> BENIGN"
+    transition_reason: "Validation protects against manipulation"
+
+  - id: "CA11"
+    type: "COMPUTATION"
+    description: "calculateBorrowPower call"
+
+    vulnerable:
+      file: "ms_tc_006.sol"
+      line: 64
+      security_function: "PREREQ"
+      rationale: "Returns inflated borrow power from manipulated prices"
+
+    fixed:
+      file: "df_tc_006.sol"
+      lines: [89, 92]
+      security_function: "BENIGN"
+      rationale: "Still reads manipulable prices but borrowing is blocked"
+
+    transition: "PREREQ -> BENIGN"
+    transition_reason: "Borrow function uses validated prices"
+
+  - id: "CA14"
+    type: "INPUT_VAL"
+    description: "Collateral check"
+
+    vulnerable:
+      file: "ms_tc_006.sol"
+      lines: [74, 75, 76, 77]
+      security_function: "PREREQ"
+      rationale: "Check passes because borrowPower is inflated"
+
+    fixed:
+      file: "df_tc_006.sol"
+      lines: [99, 100, 101, 102]
+      security_function: "BENIGN"
+      rationale: "Check uses validated borrow value"
+
+    transition: "PREREQ -> BENIGN"
+    transition_reason: "Validated prices make check meaningful"
+
+  # ============================================
+  # TRANSITIONED (SECONDARY_VULN -> still present but not annotated)
+  # ============================================
+  # Note: addMarket() still has no access control, but this is a separate issue
+  # The primary vulnerability (oracle manipulation) is fixed
+
+  # ============================================
+  # UNCHANGED CODE ACTS (BENIGN -> BENIGN)
+  # ============================================
+
+  - id: "CA6"
+    type: "INITIALIZATION"
+    description: "Constructor"
+    vulnerable:
+      file: "ms_tc_006.sol"
+      lines: [37, 38, 39]
+      security_function: "BENIGN"
+    fixed:
+      file: "df_tc_006.sol"
+      lines: [49, 50, 51]
+      security_function: "BENIGN"
+    transition: "BENIGN -> BENIGN"
+
+  - id: "CA7"
+    type: "INPUT_VAL"
+    description: "Market support check in mint"
+    vulnerable:
+      file: "ms_tc_006.sol"
+      line: 48
+      security_function: "BENIGN"
+    fixed:
+      file: "df_tc_006.sol"
+      line: 72
+      security_function: "BENIGN"
+    transition: "BENIGN -> BENIGN"
+
+  - id: "CA8"
+    type: "STATE_MOD"
+    description: "User deposit update"
+    vulnerable:
+      file: "ms_tc_006.sol"
+      line: 55
+      security_function: "BENIGN"
+    fixed:
+      file: "df_tc_006.sol"
+      line: 75
+      security_function: "BENIGN"
+    transition: "BENIGN -> BENIGN"
+
+  - id: "CA10"
+    type: "INPUT_VAL"
+    description: "Market support check in borrow"
+    vulnerable:
+      file: "ms_tc_006.sol"
+      line: 61
+      security_function: "BENIGN"
+    fixed:
+      file: "df_tc_006.sol"
+      line: 86
+      security_function: "BENIGN"
+    transition: "BENIGN -> BENIGN"
+
+  - id: "CA15"
+    type: "STATE_MOD"
+    description: "Borrow balance update"
+    vulnerable:
+      file: "ms_tc_006.sol"
+      line: 80
+      security_function: "BENIGN"
+    fixed:
+      file: "df_tc_006.sol"
+      line: 105
+      security_function: "BENIGN"
+    transition: "BENIGN -> BENIGN"
+
+summary:
+  total_code_acts: 13
+
+  transitions:
+    ROOT_CAUSE_to_BENIGN: 2   # CA13, CA20
+    PREREQ_to_BENIGN: 3       # CA1, CA11, CA14
+    BENIGN_to_BENIGN: 5       # CA6, CA7, CA8, CA10, CA15
+    NEW_to_BENIGN: 3          # CA_FIX1, CA_FIX2, CA_FIX3
+
+  by_security_function_vulnerable:
+    ROOT_CAUSE: 2
+    PREREQ: 3
+    BENIGN: 5
+
+  by_security_function_fixed:
+    BENIGN: 13  # All become BENIGN after fix
+
+  fix_effectiveness:
+    documented_vuln_fixed: true
+    notes: "Price deviation protection rejects manipulated prices (>10% deviation within 1 hour), making flash loan oracle attacks unprofitable."
+
+  root_cause_fixes:
+    - id: "CA13"
+      fix_type: "price_validation"
+      description: "borrow() now uses _validatePrice() instead of direct oracle call"
+    - id: "CA20"
+      fix_type: "indirect_protection"
+      description: "While still uses direct oracle, borrowing is protected"
+
+# ============================================
+# LINE TO CODE ACT MAPPINGS (for scoring)
+# ============================================
+
+line_to_code_act_fixed:
+  # State variables
+  26: "CA1"
+  29: "CA1"
+  32: "CA1"
+  35: "CA1"
+  38: "CA1"
+  # Price tracking (NEW)
+  41: "CA_FIX1"
+  42: "CA_FIX1"
+  43: "CA_FIX1"
+  44: "CA_FIX1"
+  # Constructor
+  49: "CA6"
+  50: "CA6"
+  51: "CA6"
+  # _validatePrice (NEW)
+  53: "CA_FIX2"
+  54: "CA_FIX2"
+  55: "CA_FIX2"
+  # Line 56: empty
+  57: "CA_FIX2"
+  58: "CA_FIX2"
+  59: "CA_FIX2"
+  60: "CA_FIX2"
+  61: "CA_FIX2"
+  # Line 62: empty
+  63: "CA_FIX2"
+  64: "CA_FIX2"
+  # mint
+  72: "CA7"
+  75: "CA8"
+  # borrow
+  86: "CA10"
+  89: "CA11"
+  92: "CA11"
+  95: "CA13"
+  96: "CA13"
+  99: "CA14"
+  100: "CA14"
+  101: "CA14"
+  102: "CA14"
+  105: "CA15"
+  # calculateBorrowPower
+  126: "CA20"
+  # updateCachedPrice (NEW)
+  178: "CA_FIX3"
+  179: "CA_FIX3"
+  180: "CA_FIX3"
+  181: "CA_FIX3"
+
+code_act_security_functions_fixed:
+  CA1: "BENIGN"
+  CA6: "BENIGN"
+  CA7: "BENIGN"
+  CA8: "BENIGN"
+  CA10: "BENIGN"
+  CA11: "BENIGN"
+  CA13: "BENIGN"
+  CA14: "BENIGN"
+  CA15: "BENIGN"
+  CA20: "BENIGN"
+  CA_FIX1: "BENIGN"
+  CA_FIX2: "BENIGN"
+  CA_FIX3: "BENIGN"

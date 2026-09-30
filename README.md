@@ -16,6 +16,7 @@ runs/                 raw evaluation records, one directory per run
     detection/        <model>/<subset>/<variant>/d_<sample>.json
     judge/            <judge>/<model>/<subset>/<variant>/j_<sample>.json
     traditional/      <tool>/<subset>/{raw,processed}/
+    codeacts/         CodeActs metrics computed from samples/tc/
     MANIFEST.json     models, subsets, judges, file counts, coverage
 
 analysis/             analysis code
@@ -23,8 +24,13 @@ analysis/             analysis code
   stats.py            bootstrap intervals, McNemar, Holm correction
   build_tables.py     main tables, writes results/
   build_appendix.py   appendix tables, writes results/
+  codeacts/           CodeActs analysers, as used for the published metrics
 
 results/              generated tables, one file per table
+
+samples/tc/           CodeActs line-level annotations
+  <variant>/code_acts_annotation/<sample>.yaml
+  codeact_taxonomy.md
 
 config/
   analysis.yaml       the analysis configuration, in one place

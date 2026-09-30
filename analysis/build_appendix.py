@@ -4,7 +4,8 @@
 Run:  python analysis/build_appendix.py
 
 Covers the traditional-tool baselines, judge agreement, Gold Standard
-per-category rates, the knowledge probe and reasoning quality scores.
+per-category rates, the knowledge probe, reasoning quality scores and the
+CodeActs Root_Cause analysis.
 """
 
 from __future__ import annotations
@@ -221,6 +222,43 @@ def reasoning_quality() -> list[str]:
     return lines
 
 
+# --------------------------------------------------------------------------
+def codeacts() -> list[str]:
+    """Root_Cause match rates and the decoy sensitivity index.
+
+    Read from the CodeActs metrics computed by analysis/codeacts/ over the 138
+    line-level annotations under samples/tc/. The index is defined over
+    Root_Cause found rates, not over TDR.
+    """
+    path = JAN / "codeacts" / "codeact_full_metrics.json"
+    data = load(path)
+    if not data or "summary" not in data:
+        return ["\n# CodeActs\n\nMetrics file not found.\n"]
+
+    lines = ["\n# CodeActs: Root_Cause match and decoy sensitivity (run 2026-01)\n",
+             "Computed over 138 line-level annotations, 46 TC samples across the\n"
+             "MinimalSanitized, Trojan and Differential variants.\n",
+             "\nIndex = (MinS - Trojan) / MinS over Root_Cause found rates.\n"
+             "`Fix recog.` is the Differential rate, where a correct response\n"
+             "reports no vulnerability once the bug is removed.\n",
+             "\n| Model | MinS RC | Trojan RC | Index | Decoy hits | Fix recog. | Understanding |",
+             "|---|---|---|---|---|---|---|"]
+
+    rows = sorted(data["summary"], key=lambda r: -r.get("tr_root_cause_found_rate", 0))
+    for row in rows:
+        name = LABEL.get(row.get("detector"), row.get("detector", "?"))
+        lines.append(
+            f"| {name} "
+            f"| {100 * row.get('ms_root_cause_found_rate', 0):.1f} "
+            f"| {100 * row.get('tr_root_cause_found_rate', 0):.1f} "
+            f"| {100 * row.get('contamination_index', 0):.1f} "
+            f"| {row.get('tr_total_decoy_hits', 0)} "
+            f"| {row.get('fix_recognition', 0):.3f} "
+            f"| {row.get('understanding_score', 0):.3f} |"
+        )
+    return lines
+
+
 def main() -> None:
     OUT.mkdir(exist_ok=True)
     (OUT / "traditional_baselines.md").write_text("\n".join(traditional_baselines()) + "\n")
@@ -228,9 +266,10 @@ def main() -> None:
     (OUT / "gs_by_category.md").write_text(HEADER + "\n".join(gs_by_category()) + "\n")
     (OUT / "knowledge_probe.md").write_text(HEADER + "\n".join(knowledge_probe()) + "\n")
     (OUT / "reasoning_quality.md").write_text(HEADER + "\n".join(reasoning_quality()) + "\n")
+    (OUT / "codeacts.md").write_text(HEADER + "\n".join(codeacts()) + "\n")
     print("wrote:")
     for name in ("traditional_baselines", "judge_agreement", "gs_by_category",
-                 "knowledge_probe", "reasoning_quality"):
+                 "knowledge_probe", "reasoning_quality", "codeacts"):
         print(f"  results/{name}.md")
 
 
