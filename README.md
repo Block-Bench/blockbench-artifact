@@ -42,7 +42,8 @@ python analysis/build_tables.py     # writes results/
 python tools/build_manifests.py     # rewrites runs/*/MANIFEST.json
 ```
 
-Python 3.10 or newer. Standard library only, no dependencies to install.
+Python 3.9 or newer. Standard library only, no dependencies to install.
+Output is deterministic; re-running produces identical files.
 
 ## Record layout
 
