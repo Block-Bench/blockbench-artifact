@@ -1,59 +1,74 @@
 # BlockBench Artifact
 
-Reproducibility artifact for the BlockBench papers. Tagged per publication.
+Evaluation records and analysis code for the BlockBench papers.
 
-BlockBench is a contamination-controlled evaluation of LLM smart contract
-vulnerability detection. This repository holds the raw evaluation records and
-the analysis code that turns them into the numbers reported in the paper.
+The benchmark itself (contracts, transformation strategies, dataset browser)
+lives in [Block-Bench/base](https://github.com/Block-Bench/base). This
+repository holds what was run and the code that computes the result tables
+from it.
 
-The living benchmark itself (contracts, transformation strategies, dataset
-browser) lives in [Block-Bench/base](https://github.com/Block-Bench/base).
-This repository is the frozen record of what was run.
-
-## Layout
+## Structure
 
 ```
-runs/2026-01/     first evaluation round
-runs/2026-05/     second round, four months later
-  detection/      per-model model outputs, including raw responses
-  judge/          per-judge assessments of those outputs
-  traditional/    Slither and Mythril
-  MANIFEST.json   what the run contains, including its gaps
-analysis/         judge rules, statistics, table builder
-paper_artifacts/  generated tables, one file per paper object
-config/           the pinned analysis configuration
-docs/             provenance, licensing, open questions
-tools/            manifest generation
+runs/                 raw evaluation records, one directory per run
+  2026-01/
+  2026-05/
+    detection/        <model>/<subset>/<variant>/d_<sample>.json
+    judge/            <judge>/<model>/<subset>/<variant>/j_<sample>.json
+    traditional/      <tool>/<subset>/{raw,processed}/
+    MANIFEST.json     models, subsets, judges, file counts, coverage
+
+analysis/             analysis code
+  judge_rules.py      judge selection, vote rule, target-found rule
+  stats.py            bootstrap intervals, McNemar, Holm correction
+  build_tables.py     entry point, writes results/
+
+results/              generated tables, one file per table
+
+config/
+  analysis.yaml       the analysis configuration, in one place
+
+tools/
+  build_manifests.py  regenerates runs/*/MANIFEST.json
 ```
 
-## Two runs, not one
+Runs are named by evaluation date. The same Gold Standard contracts appear in
+both runs, so slicing by run directory gives the two evaluation dates directly.
 
-The same Gold Standard contracts were evaluated twice, in January and May
-2026, with the same models, prompts and judges. Detection on those fixed
-contracts rose from roughly 6% to roughly 85% over that interval. Both runs
-are therefore required to reproduce the paper, and `runs/` is scoped by
-evaluation date rather than by iteration so the comparison is visible in the
-directory structure.
-
-## Reproducing the paper
+## Running it
 
 ```bash
-python analysis/build_tables.py
+python analysis/build_tables.py     # writes results/
+python tools/build_manifests.py     # rewrites runs/*/MANIFEST.json
 ```
 
-Outputs land in `paper_artifacts/`. See [REPRODUCE.md](REPRODUCE.md) for which
-file backs which table, and which numbers reproduce exactly.
+Python 3.10 or newer. Standard library only, no dependencies to install.
 
-## Judges
+## Record layout
 
-Five judge models appear in the raw data. Only three back published numbers:
-`glm-4.7`, `mimo-v2-flash` and `mistral-large`. The other two, `codestral`
-and `gemini-3-flash`, come from a superseded pipeline that averaged per-judge
-rates instead of voting; they are retained for completeness and are marked
-unused in `config/analysis.yaml` and in each `MANIFEST.json`.
+A detection record carries the prompt sent, the parsed prediction, the full
+raw model response, ground-truth fields for the sample, and API metrics.
+
+A judge record carries the judge's per-finding classifications and a
+`target_assessment` block holding `complete_found`, `partial_found`,
+`root_cause_match`, `location_match`, `type_match` and the three reasoning
+quality scores.
+
+Within any subset directory, files whose basename begins with `_` are
+per-directory aggregates rather than samples.
+
+## Configuration
+
+`config/analysis.yaml` holds the judge set, vote rule, target-found rule,
+sample counts and statistical parameters used by `analysis/`. Change it there
+rather than in the analysis modules.
+
+Five judge models appear under `runs/*/judge/`. The set used by the analysis
+code is listed in `config/analysis.yaml`; the remainder are retained as part
+of the record.
 
 ## Licensing
 
-Code is MIT. Our own annotations and metadata are CC BY 4.0. The Solidity
-source contracts keep their upstream licences, which are not uniform. See
-[NOTICE.md](NOTICE.md) before redistributing.
+Code is MIT (`LICENSE-CODE`). Annotations and metadata we authored are
+CC BY 4.0 (`LICENSE-DATA`). Solidity source contracts and raw model responses
+keep their upstream terms; see `NOTICE.md`.

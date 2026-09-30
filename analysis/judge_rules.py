@@ -14,11 +14,8 @@ The rules are not obvious from the raw files, so they are pinned here:
 3. GS uses ``complete_found`` alone. See docs/OPEN_QUESTIONS.md.
 4. Files whose basename starts with "_" are per-tier aggregates, not
    samples, and must be skipped or every denominator is inflated.
-5. A minority of judge outputs carry a legacy ``found`` key instead of
-   ``complete_found``. The published pipeline read ``complete_found`` with a
-   default of False and never consulted ``found``, so those samples counted
-   as misses. We reproduce that behaviour rather than silently correcting it;
-   ``legacy_found=True`` shows what the corrected reading would give.
+5. ``complete_found`` is read with a default of False. A legacy ``found`` key
+   present in some outputs is not consulted.
 """
 
 from __future__ import annotations
@@ -35,18 +32,11 @@ def is_sample_file(path: Path) -> bool:
     return path.suffix == ".json" and not path.name.startswith("_")
 
 
-def target_found(
-    path: Path,
-    rule: str = "complete_or_partial",
-    legacy_found: bool = False,
-) -> bool | None:
+def target_found(path: Path, rule: str = "complete_or_partial") -> bool | None:
     """Did the judge consider the documented target vulnerability found?
 
     Returns None when the file cannot be read or carries no assessment, so
     callers can distinguish a failed judgment from a genuine miss.
-
-    Set ``legacy_found`` to also honour the older ``found`` key. This departs
-    from the published numbers; see the module docstring.
     """
     try:
         data = json.loads(path.read_text())
@@ -58,8 +48,6 @@ def target_found(
         return None
 
     complete = ta.get("complete_found", False)
-    if legacy_found and "complete_found" not in ta:
-        complete = ta.get("found", False)
     if rule == "complete_only":
         return bool(complete)
     return bool(complete) or bool(ta.get("partial_found", False))

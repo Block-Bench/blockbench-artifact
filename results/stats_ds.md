@@ -35,9 +35,3 @@ pipeline applied no correction, so raw and adjusted values are both shown.
 | GPT-5.2 vs Qwen3-Coder-Plus | 20 | 13 | 0.2963 | 1.0000 | no |
 | Llama 4 Maverick vs Qwen3-Coder-Plus | 10 | 12 | 0.8312 | 1.0000 | no |
 | GPT-5.2 vs DeepSeek v3.2 | 18 | 17 | 1.0000 | 1.0000 | no |
-
-Comparisons significant raw but not after Holm: **4**
-- Claude Opus 4.5 vs Gemini 3 Pro
-- Gemini 3 Pro vs GPT-5.2
-- Llama 4 Maverick vs Grok 4.3
-- Qwen3-Coder-Plus vs Grok 4.3

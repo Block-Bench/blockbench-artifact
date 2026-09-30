@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-"""Regenerate every published BlockBench number into paper_artifacts/.
+"""Compute the BlockBench result tables into results/.
 
 Run:  python analysis/build_tables.py
 
-Each output file states the judge configuration and the sample set it used,
-so a reader never has to guess which of the five judges in the raw data
-backs a given figure.
+Each output file records the judge configuration and sample set it used.
 """
 
 from __future__ import annotations
@@ -20,7 +18,7 @@ sys.path.insert(0, str(ROOT / "analysis"))
 from judge_rules import JUDGES_MAJORITY, is_sample_file, majority, rate, target_found
 from stats import bootstrap_ci_tier_mean, holm, mcnemar
 
-OUT = ROOT / "paper_artifacts"
+OUT = ROOT / "results"
 JAN = ROOT / "runs" / "2026-01"
 MAY = ROOT / "runs" / "2026-05"
 
@@ -52,23 +50,27 @@ def fmt(value: float | None) -> str:
     return "--" if value is None else f"{value:.1f}"
 
 
-def ds_outcomes(model: str) -> dict[str, list[bool]]:
-    """Per-tier per-contract majority outcomes, for the statistics."""
-    per_tier: dict[str, list[bool]] = {}
+def ds_outcomes(model: str) -> dict[str, dict[str, bool]]:
+    """Per-tier majority outcomes keyed by sample id.
+
+    Keyed rather than listed so that paired tests match contract to contract
+    instead of relying on two models happening to iterate in the same order.
+    """
+    per_tier: dict[str, dict[str, bool]] = {}
     for tier in TIERS:
         names: set[str] = set()
         for judge in JUDGES_MAJORITY:
             directory = JAN / "judge" / judge / model / "ds" / tier
             if directory.is_dir():
                 names |= {p.name for p in directory.iterdir() if is_sample_file(p)}
-        outcomes = []
+        outcomes: dict[str, bool] = {}
         for name in sorted(names):
             verdict = majority([
                 target_found(JAN / "judge" / j / model / "ds" / tier / name)
                 for j in JUDGES_MAJORITY
             ])
             if verdict is not None:
-                outcomes.append(verdict)
+                outcomes[f"{tier}/{name}"] = verdict
         per_tier[tier] = outcomes
     return per_tier
 
@@ -141,11 +143,13 @@ def main() -> None:
     ds_stats = {}
     for model in MODELS:
         tiers = ds_outcomes(model)
-        tier_rates = [100.0 * sum(v) / len(v) for v in (tiers[t] for t in TIERS) if v]
+        tier_rates = [
+            100.0 * sum(tiers[t].values()) / len(tiers[t]) for t in TIERS if tiers[t]
+        ]
         avg = sum(tier_rates) / len(tier_rates) if tier_rates else None
-        flat = [o for t in TIERS for o in tiers[t]]
-        lo, hi = bootstrap_ci_tier_mean({t: tiers[t] for t in TIERS})
-        ds_stats[model] = {"per_tier": {t: tiers[t] for t in TIERS}, "flat": flat, "avg": avg}
+        keyed = {k: v for t in TIERS for k, v in tiers[t].items()}
+        lo, hi = bootstrap_ci_tier_mean({t: list(tiers[t].values()) for t in TIERS})
+        ds_stats[model] = {"keyed": keyed, "avg": avg}
 
         tc_rates = []
         cells = []
@@ -156,7 +160,10 @@ def main() -> None:
                 tc_rates.append(r)
         tc_avg = sum(tc_rates) / len(tc_rates) if tc_rates else None
 
-        row = [LABEL[model]] + [fmt(100.0 * sum(tiers[t]) / len(tiers[t]) if tiers[t] else None) for t in TIERS]
+        row = [LABEL[model]] + [
+            fmt(100.0 * sum(tiers[t].values()) / len(tiers[t]) if tiers[t] else None)
+            for t in TIERS
+        ]
         row += [fmt(avg), f"[{lo:.0f}--{hi:.0f}]"] + cells + [fmt(tc_avg)]
         lines.append("| " + " | ".join(row) + " |")
     (OUT / "table3_ds_tc.md").write_text("\n".join(lines) + "\n")
@@ -219,9 +226,9 @@ def main() -> None:
     pvals, discord = {}, {}
     for i, a in enumerate(MODELS):
         for b in MODELS[i + 1:]:
-            fa, fb = ds_stats[a]["flat"], ds_stats[b]["flat"]
-            size = min(len(fa), len(fb))
-            p, bb, cc = mcnemar(fa[:size], fb[:size])
+            ka, kb = ds_stats[a]["keyed"], ds_stats[b]["keyed"]
+            shared = sorted(set(ka) & set(kb))
+            p, bb, cc = mcnemar([ka[k] for k in shared], [kb[k] for k in shared])
             key = f"{LABEL[a]} vs {LABEL[b]}"
             pvals[key] = p
             discord[key] = (bb, cc)
@@ -238,10 +245,6 @@ def main() -> None:
         bb, cc = discord[key]
         lines.append(f"| {key} | {bb} | {cc} | {p:.4f} | {adjusted[key]:.4f} | "
                      f"{'yes' if adjusted[key] < 0.05 else 'no'} |")
-    flipped = [k for k, p in pvals.items() if p < 0.05 <= adjusted[k]]
-    lines.append(f"\nComparisons significant raw but not after Holm: **{len(flipped)}**")
-    for key in flipped:
-        lines.append(f"- {key}")
     (OUT / "stats_ds.md").write_text("\n".join(lines) + "\n")
 
     print("wrote:")
