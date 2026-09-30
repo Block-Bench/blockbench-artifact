@@ -21,7 +21,8 @@ runs/                 raw evaluation records, one directory per run
 analysis/             analysis code
   judge_rules.py      judge selection, vote rule, target-found rule
   stats.py            bootstrap intervals, McNemar, Holm correction
-  build_tables.py     entry point, writes results/
+  build_tables.py     main tables, writes results/
+  build_appendix.py   appendix tables, writes results/
 
 results/              generated tables, one file per table
 
@@ -39,6 +40,7 @@ both runs, so slicing by run directory gives the two evaluation dates directly.
 
 ```bash
 python analysis/build_tables.py     # writes results/
+python analysis/build_appendix.py   # writes results/
 python tools/build_manifests.py     # rewrites runs/*/MANIFEST.json
 ```
 
